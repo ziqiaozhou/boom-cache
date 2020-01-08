@@ -234,7 +234,7 @@ class ICacheModule(outer: ICache) extends ICacheBaseModule(outer)
     ccover(tl_out.d.bits.corrupt, "D_CORRUPT", "I$ D-channel corrupt")
   }
 
-  val vb_array = RegInit(0.U((nSets*nWays).W))
+  val vb_array = RegInit(~(0.U((nSets*nWays).W)))
   when (refill_one_beat) {
     // clear bit when refill starts so hit-under-miss doesn't fetch bad data
     vb_array := vb_array.bitSet(Cat(repl_way, refill_idx), refill_done && !invalidated)
@@ -242,7 +242,7 @@ class ICacheModule(outer: ICache) extends ICacheBaseModule(outer)
 
   val invalidate = WireInit(io.invalidate)
   when (invalidate) {
-    vb_array := 0.U
+    vb_array := ~(0.U((nSets*nWays).W))
     invalidated := true.B
   }
 
