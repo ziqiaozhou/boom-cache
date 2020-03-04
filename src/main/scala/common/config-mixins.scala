@@ -9,7 +9,7 @@ import chisel3._
 import chisel3.util.{log2Up}
 
 import freechips.rocketchip.config.{Parameters, Config, Field}
-import freechips.rocketchip.subsystem.{SystemBusKey, RocketTilesKey, RocketCrossingParams}
+import freechips.rocketchip.subsystem.{SystemBusKey, RocketTilesKey, RocketCrossingParams,WithNoSlavePort,WithNoMMIOPort,WithoutTLMonitors,WithExtMemSize}
 import freechips.rocketchip.devices.tilelink.{BootROMParams}
 import freechips.rocketchip.diplomacy.{SynchronousCrossing, AsynchronousCrossing, RationalCrossing}
 import freechips.rocketchip.rocket._
@@ -22,7 +22,6 @@ import boom.lsu._
 
 case object BoomTilesKey extends Field[Seq[BoomTileParams]](Nil)
 case object BoomCrossingKey extends Field[Seq[RocketCrossingParams]](List(RocketCrossingParams()))
-
 // ---------------------
 // BOOM Configs
 // ---------------------
@@ -103,6 +102,58 @@ class WithNBoomCores(n: Int) extends Config(
     }
   })
 )
+class WithMyTinyBoomsInternal(nsets: Int, nways: Int) extends Config((site, here, up) => {
+  case BoomTilesKey => up(BoomTilesKey, site) map { b => b.copy(
+    core = b.core.copy(
+      mtvecWritable=false,
+      useAtomics=false,
+      useDebug=false,
+      fpu=None,
+      fetchWidth = 4,
+      useCompressed = true,
+      decodeWidth = 1,
+      numRobEntries = 8,
+      issueParams = Seq(
+        IssueParams(issueWidth=1, numEntries=3, iqType=IQT_MEM.litValue, dispatchWidth=1),
+        IssueParams(issueWidth=1, numEntries=3, iqType=IQT_INT.litValue, dispatchWidth=1),
+        IssueParams(issueWidth=1, numEntries=3, iqType=IQT_FP.litValue , dispatchWidth=1)),
+      numIntPhysRegisters = 48,
+      numFpPhysRegisters =48,
+      numLdqEntries = 4,
+      numStqEntries = 4,
+      maxBrCount = 4,
+      numFetchBufferEntries = 8,
+      btb = BoomBTBParameters(btbsa=true, densebtb=false, nSets=8, nWays=4,
+                              nRAS=8, tagSz=20, bypassCalls=false, rasCheckForEmpty=false),
+      bpdBaseOnly = None,
+      bim = BimParameters(nSets=8,nResetLagCycles=1,nBanks=2),
+      gshare = Some(GShareParameters(enabled=true, historyLength=5, numSets=4)),
+      nPerfCounters = 0,
+      tage = None,
+      bpdRandom = None,
+      mulDiv = None
+    ),
+    dcache = Some(DCacheParams(rowBits = site(SystemBusKey).beatBits,
+                               nSets=nsets, nWays=nways, usingRandomCache=true, nMSHRs=2, nTLBEntries=4)),
+    icache = Some(ICacheParams(rowBits = site(SystemBusKey).beatBits, nSets=8, nWays=4, fetchBytes=2*4))
+  )}
+  case SystemBusKey => up(SystemBusKey, site).copy(beatBytes = 8)
+  case XLen => 32
+  case MaxHartIdBits => log2Up(site(BoomTilesKey).size)
+})
+/**
+ * 1-wide BOOM.
+ */
+class WithMyTinyBooms(nsets: Int, nways: Int) extends Config(
+  new WithExtMemSize(2048) ++
+  new WithNoMMIOPort ++
+  new WithNoSlavePort ++
+  //new WithoutBoomRVC ++
+  new WithoutTLMonitors ++
+  new WithoutBoomFPU++
+  new WithoutFetchMonitor++
+  new WithMyTinyBoomsInternal(nsets,nways)
+)
 
 /**
  * Class to renumber BOOM + Rocket harts so that there are no overlapped harts
@@ -146,6 +197,7 @@ class WithRationalBoomTiles extends Config((site, here, up) => {
     b.copy(crossingType = RationalCrossing())
   }
 })
+
 
 /**
  * 1-wide BOOM.

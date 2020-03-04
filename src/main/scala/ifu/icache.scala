@@ -246,6 +246,7 @@ class ICacheModule(outer: ICache) extends ICacheBaseModule(outer)
   }
 
   val tag_array = SyncReadMem(nSets, Vec(nWays, UInt(tECC.width(1 + tagBits).W)))
+  tag_array.suggestName("itag_array")
   val tag_rdata = tag_array.read(s0_vaddr(untagBits-1,blockOffBits), !refill_done && s0_valid)
   val accruedRefillError = Reg(Bool())
   when (refill_done) {
@@ -256,7 +257,7 @@ class ICacheModule(outer: ICache) extends ICacheBaseModule(outer)
     ccover(tl_out.d.bits.corrupt, "D_CORRUPT", "I$ D-channel corrupt")
   }
 
-  val vb_array = RegInit(0.U((nSets*nWays).W))
+  val vb_array = RegInit(~(0.U((nSets*nWays).W)))
   when (refill_one_beat) {
     // clear bit when refill starts so hit-under-miss doesn't fetch bad data
     vb_array := vb_array.bitSet(Cat(repl_way, refill_idx), refill_done && !invalidated)
@@ -264,7 +265,7 @@ class ICacheModule(outer: ICache) extends ICacheBaseModule(outer)
 
   val invalidate = WireInit(io.invalidate)
   when (invalidate) {
-    vb_array := 0.U
+    vb_array := ~(0.U((nSets*nWays).W))
     invalidated := true.B
   }
 

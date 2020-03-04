@@ -15,7 +15,7 @@ import freechips.rocketchip.tilelink._
 import freechips.rocketchip.tile._
 import freechips.rocketchip.util._
 import freechips.rocketchip.rocket._
-
+import chisel3.util.experimental.loadMemoryFromFile
 import boom.common._
 import boom.exu.BrResolutionInfo
 import boom.util.{IsKilledByBranch, GetNewBrMask, BranchKillableQueue, IsOlder, UpdateBrMask, AgePriorityEncoder, WrapInc, Transpose}
@@ -60,7 +60,7 @@ class BoomWritebackUnit(implicit edge: TLEdgeOut, p: Parameters) extends L1Hella
 
 
 
-  val r_address = Cat(req.tag, req.idx) << blockOffBits
+  val r_address = Cat(req.tag >> idx_in_tag, req.idx) << blockOffBits
   val id = cfg.nMSHRs
   val probeResponse = edge.ProbeAck(
                           fromSource = id.U,
@@ -164,7 +164,7 @@ class BoomProbeUnit(implicit edge: TLEdgeOut, p: Parameters) extends L1HellaCach
 
   val req = Reg(new TLBundleB(edge.bundle))
   val req_idx = req.address(idxMSB, idxLSB)
-  val req_tag = req.address >> untagBits
+  val req_tag = req.address >> (untagBits-idx_in_tag)
 
   val way_en = Reg(UInt())
   val tag_matches = way_en.orR
@@ -183,7 +183,6 @@ class BoomProbeUnit(implicit edge: TLEdgeOut, p: Parameters) extends L1HellaCach
   io.meta_read.valid := state === s_meta_read
   io.meta_read.bits.idx := req_idx
   io.meta_read.bits.tag := req_tag
-
   io.meta_write.valid := state === s_meta_write
   io.meta_write.bits.way_en := way_en
   io.meta_write.bits.idx := req_idx
@@ -192,7 +191,7 @@ class BoomProbeUnit(implicit edge: TLEdgeOut, p: Parameters) extends L1HellaCach
 
   io.wb_req.valid := state === s_writeback_req
   io.wb_req.bits.source := req.source
-  io.wb_req.bits.idx := req_idx
+  io.wb_req.bits.idx :=req_idx
   io.wb_req.bits.tag := req_tag
   io.wb_req.bits.param := report_param
   io.wb_req.bits.way_en := way_en
@@ -265,6 +264,8 @@ class BoomDataArray(implicit p: Parameters) extends BoomModule with HasL1HellaCa
     val write = Input(Valid(new L1DataWriteReq))
     val resp  = Output(Vec(memWidth, Vec(nWays, Bits(encRowBits.W))))
     val nacks = Output(Vec(memWidth, Bool()))
+    val read_random_set =Input(Vec(memWidth,Vec(nWays,new L1RandomData)))
+    val write_random_set =Input(Vec(nWays,new L1RandomData))
   })
 
   def pipeMap[T <: Data](f: Int => T) = VecInit((0 until memWidth).map(f))
@@ -320,13 +321,23 @@ class BoomDataArray(implicit p: Parameters) extends BoomModule with HasL1HellaCa
         size = bankSize,
         data = Vec(rowWords, Bits(encDataBits.W))
       )
-      val ridx = Mux1H(s0_bank_read_gnts(b), s0_ridxs)
+      /*val ridx = Mux1H(s0_bank_read_gnts(b), s0_ridxs)
       val way_en = Mux1H(s0_bank_read_gnts(b), io.read.map(_.bits.way_en))
+      */
+      val random_ridx = Mux1H(s0_bank_read_gnts(b), s0_ridxs)
+      val random_way_en = Mux1H(s0_bank_read_gnts(b), io.read.map(_.bits.way_en))
+      val linePerTag = log2Ceil(refillCycles / nBanks)
+      var read_random_set=Mux1H(s0_bank_read_gnts(b),io.read_random_set)
+      val random_choice = read_random_set(OHToUInt(random_way_en))
+      val way_en = UIntToOH(random_choice.way).asUInt
+      val idx= random_choice.req_idx
+      val ridx = (idx<<linePerTag)+ (random_ridx(linePerTag-1,0))
+      var widx=((io.write_random_set(OHToUInt(io.write.bits.wmask)).req_idx)<<linePerTag)+ s0_widx(linePerTag-1,0)
+      var wway_en=UIntToOH(io.write_random_set(OHToUInt(io.write.bits.way_en)).way).asUInt
       s2_bank_reads(b) := array.read(ridx, way_en(w) && s0_bank_read_gnts(b).reduce(_||_)).asUInt
-
-      when (io.write.bits.way_en(w) && s0_bank_write_gnt(b)) {
+      when (wway_en(w) && s0_bank_write_gnt(b)) {
         val data = VecInit((0 until rowWords) map (i => io.write.bits.data(encDataBits*(i+1)-1,encDataBits*i)))
-        array.write(s0_widx, data, io.write.bits.wmask.asBools)
+        array.write(widx, data, io.write.bits.wmask.asBools)
       }
     }
 
@@ -397,6 +408,23 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
   val wb = Module(new BoomWritebackUnit)
   val prober = Module(new BoomProbeUnit)
   val mshrs = Module(new BoomMSHRFile)
+  //var onResetRandom=VecInit(Seq.fill(nWays)(L1RandomData(0.U,0.U).asUInt))
+  
+  val random_map_array = Mem(nSets*nWays,new L1RandomData);
+    //val random_map_array = VecInit(Seq.fill(nSets)(onResetRandom))
+ loadMemoryFromFile(random_map_array,"random_map_array.txt")
+ random_map_array.suggestName("random_map_array")
+ //for (w <- 0 until memWidth) {
+  val nidxBits    = log2Ceil(nSets)
+  var idx= io.lsu.req.bits(0).bits.addr >> blockOffBits
+
+  when(io.lsu.exception){
+    for( w <- 0 until nWays){
+      random_map_array(Cat(w.U,idx)):=L1RandomData(idx,idx)
+
+    }
+  }
+ //}
   mshrs.io.clear_all    := io.lsu.force_order
   mshrs.io.brinfo       := io.lsu.brinfo
   mshrs.io.exception    := io.lsu.exception
@@ -418,6 +446,11 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
     meta(w).io.write.bits  := metaWriteArb.io.out.bits
     meta(w).io.read.valid  := metaReadArb.io.out.valid
     meta(w).io.read.bits   := metaReadArb.io.out.bits.req(w)
+    for (way <- 0 until nWays){
+    meta(w).io.read_random_set(way)   := random_map_array(Cat(way.U,metaReadArb.io.out.bits.req(w).idx(nidxBits-1,0)))
+    meta(w).io.write_random_set(way)   := random_map_array(Cat(way.U,metaWriteArb.io.out.bits.idx(nidxBits-1,0)))
+    }
+
   }
   metaReadArb.io.out.ready  := meta.map(_.io.read.ready).reduce(_||_)
   metaWriteArb.io.out.ready := meta.map(_.io.write.ready).reduce(_||_)
@@ -433,16 +466,22 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
   for (w <- 0 until memWidth) {
     data.io.read(w).valid := dataReadArb.io.out.bits.valid(w) && dataReadArb.io.out.valid
     data.io.read(w).bits  := dataReadArb.io.out.bits.req(w)
+    for(way <- 0 until nWays){
+        data.io.read_random_set(w)(way) :=random_map_array(Cat(way.U,dataReadArb.io.out.bits.req(w).addr>> blockOffBits)(nidxBits-1,0)) 
+    }
   }
   dataReadArb.io.out.ready := true.B
 
   data.io.write.valid := dataWriteArb.io.out.fire()
   data.io.write.bits  := dataWriteArb.io.out.bits
+
+  for(way <- 0 until nWays){
+    data.io.write_random_set(way) :=random_map_array(Cat(way.U,dataWriteArb.io.out.bits.addr >> blockOffBits)(nidxBits-1,0))
+  }
   dataWriteArb.io.out.ready := true.B
 
   // ------------
   // New requests
-
   io.lsu.req.ready := metaReadArb.io.in(4).ready && dataReadArb.io.in(2).ready
   metaReadArb.io.in(4).valid := io.lsu.req.valid
   dataReadArb.io.in(2).valid := io.lsu.req.valid
@@ -452,7 +491,7 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
     metaReadArb.io.in(4).bits.req(w).way_en := DontCare
     metaReadArb.io.in(4).bits.req(w).tag    := DontCare
     // Data read for new requests
-    dataReadArb.io.in(2).bits.valid(w)      := io.lsu.req.bits(w).valid
+      dataReadArb.io.in(2).bits.valid(w)      := io.lsu.req.bits(w).valid
     dataReadArb.io.in(2).bits.req(w).addr   := io.lsu.req.bits(w).bits.addr
     dataReadArb.io.in(2).bits.req(w).way_en := ~0.U(nWays.W)
   }
@@ -472,6 +511,8 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
   metaReadArb.io.in(0).bits.req(0).idx    := mshrs.io.replay.bits.addr >> blockOffBits
   metaReadArb.io.in(0).bits.req(0).way_en := DontCare
   metaReadArb.io.in(0).bits.req(0).tag    := DontCare
+
+
   // Data read for MSHR replays
   dataReadArb.io.in(0).valid              := mshrs.io.replay.valid
   dataReadArb.io.in(0).bits.req(0).addr   := mshrs.io.replay.bits.addr
@@ -483,7 +524,7 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
   val mshr_read_req = Wire(Vec(memWidth, new BoomDCacheReq))
   mshr_read_req             := DontCare
   mshr_read_req(0).uop      := NullMicroOp
-  mshr_read_req(0).addr     := Cat(mshrs.io.meta_read.bits.tag, mshrs.io.meta_read.bits.idx) << blockOffBits
+  mshr_read_req(0).addr     := Cat(mshrs.io.meta_read.bits.tag >> idx_in_tag, mshrs.io.meta_read.bits.idx) << blockOffBits
   mshr_read_req(0).data     := DontCare
   mshr_read_req(0).is_hella := false.B
   metaReadArb.io.in(3).valid       := mshrs.io.meta_read.valid
@@ -498,7 +539,7 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
   val wb_req = Wire(Vec(memWidth, new BoomDCacheReq))
   wb_req             := DontCare
   wb_req(0).uop      := NullMicroOp
-  wb_req(0).addr     := Cat(wb.io.meta_read.bits.tag, wb.io.data_req.bits.addr)
+  wb_req(0).addr     := Cat(wb.io.meta_read.bits.tag>> idx_in_tag , wb.io.data_req.bits.addr)
   wb_req(0).data     := DontCare
   wb_req(0).is_hella := false.B
   // Couple the two decoupled interfaces of the WBUnit's meta_read and data_read
@@ -519,7 +560,7 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
   val prober_req   = Wire(Vec(memWidth, new BoomDCacheReq))
   prober_req             := DontCare
   prober_req(0).uop      := NullMicroOp
-  prober_req(0).addr     := Cat(prober.io.meta_read.bits.tag, prober.io.meta_read.bits.idx) << blockOffBits
+  prober_req(0).addr     := Cat(prober.io.meta_read.bits.tag>>idx_in_tag , prober.io.meta_read.bits.idx) << blockOffBits
   prober_req(0).data     := DontCare
   prober_req(0).is_hella := false.B
   // Tag read for prober
@@ -586,7 +627,7 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
 
   // tag check
   def wayMap[T <: Data](f: Int => T) = VecInit((0 until nWays).map(f))
-  val s1_tag_eq_way = widthMap(i => wayMap((w: Int) => meta(i).io.resp(w).tag === (s1_addr(i) >> untagBits)).asUInt)
+  val s1_tag_eq_way = widthMap(i => wayMap((w: Int) => meta(i).io.resp(w).tag === (s1_addr(i) >> (untagBits-idx_in_tag))).asUInt)
   val s1_tag_match_way = widthMap(i =>
                          Mux(s1_type === t_replay, s1_replay_way_en,
                          Mux(s1_type === t_wb,     s1_wb_way_en,
