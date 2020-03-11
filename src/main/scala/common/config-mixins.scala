@@ -134,7 +134,7 @@ class WithMyTinyBoomsInternal(nsets: Int, nways: Int) extends Config((site, here
       mulDiv = None
     ),
     dcache = Some(DCacheParams(rowBits = site(SystemBusKey).beatBits,
-                               nSets=nsets, nWays=nways, usingRandomCache=true, nMSHRs=2, nTLBEntries=4)),
+                               nSets=nsets, nWays=nways, usingRandomCache=1, nMSHRs=2, nTLBEntries=4)),
     icache = Some(ICacheParams(rowBits = site(SystemBusKey).beatBits, nSets=8, nWays=4, fetchBytes=2*4))
   )}
   case SystemBusKey => up(SystemBusKey, site).copy(beatBytes = 8)

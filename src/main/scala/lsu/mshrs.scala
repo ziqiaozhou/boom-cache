@@ -327,6 +327,7 @@ class BoomMSHR(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()(p)
 
     io.refill.valid       := io.lb_read.fire()
     io.refill.bits.addr   := req_block_addr | (refill_ctr << rowOffBits)
+    io.refill.bits.full_addr   := req.addr
     io.refill.bits.way_en := req.way_en
     io.refill.bits.wmask  := ~(0.U(rowWords.W))
     io.refill.bits.data   := io.lb_resp

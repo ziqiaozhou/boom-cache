@@ -409,21 +409,34 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
   val prober = Module(new BoomProbeUnit)
   val mshrs = Module(new BoomMSHRFile)
   //var onResetRandom=VecInit(Seq.fill(nWays)(L1RandomData(0.U,0.U).asUInt))
-  
-  val random_map_array = Mem(nSets*nWays,new L1RandomData);
+  var nMemPerDomain= nSets* nWays
+  var valid_addr_len=log2Ceil(nMemPerDomain) 
+  val random_map_array = if(cacheParams.usingRandomCache==1)  Mem(nMemPerDomain*nWays,new L1RandomData) 
+  else if (cacheParams.usingRandomCache==2) Mem(nMemPerDomain*cacheParams.r,UInt(width=log2Ceil(nSets))) else Mem(nSets*nWays,new L1RandomData)
     //val random_map_array = VecInit(Seq.fill(nSets)(onResetRandom))
  loadMemoryFromFile(random_map_array,"random_map_array.txt")
  random_map_array.suggestName("random_map_array")
  //for (w <- 0 until memWidth) {
-  val nidxBits    = log2Ceil(nSets)
-  var idx= io.lsu.req.bits(0).bits.addr >> blockOffBits
+ val nidxBits    = if(cacheParams.usingRandomCache>0) log2Ceil(nMemPerDomain)  else log2Ceil(nSets)
 
-  when(io.lsu.exception){
-    for( w <- 0 until nWays){
-      random_map_array(Cat(w.U,idx)):=L1RandomData(idx,idx)
+ var idx= io.lsu.req.bits(0).bits.addr >> blockOffBits
+ //val random_key = Vec(nWays,Vec(log2Ceil(nSets),UInt(width=valid_addr_len)))
+ when(io.lsu.exception){
+   if(cacheParams.usingRandomCache==1){
+     for( w <- 0 until nWays){
+       // random_key=w
+       random_map_array(Cat(w.U,idx(nidxBits-1,0))):=L1RandomData(idx(nidxBits-1,0),idx(nidxBits-1,0))
+     }
+   }
+   if(cacheParams.usingRandomCache==2){
+     for( w <- 0 until cacheParams.r){
+       // random_key=w
+       random_map_array(Cat(w.U,idx(nidxBits-1,0))):=L1RandomData(idx(nidxBits-1,0),idx(nidxBits-1,0))
+     }
 
-    }
-  }
+   }
+ }
+ //def random_map_cache (way: Int(width=nWays),address:Int) = (address^random_key(way)).xorR
  //}
   mshrs.io.clear_all    := io.lsu.force_order
   mshrs.io.brinfo       := io.lsu.brinfo
@@ -447,8 +460,10 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
     meta(w).io.read.valid  := metaReadArb.io.out.valid
     meta(w).io.read.bits   := metaReadArb.io.out.bits.req(w)
     for (way <- 0 until nWays){
-    meta(w).io.read_random_set(way)   := random_map_array(Cat(way.U,metaReadArb.io.out.bits.req(w).idx(nidxBits-1,0)))
-    meta(w).io.write_random_set(way)   := random_map_array(Cat(way.U,metaWriteArb.io.out.bits.idx(nidxBits-1,0)))
+      if(cacheParams.usingRandomCache==1){
+        meta(w).io.read_random_set(way)   := random_map_array(Cat(way.U,Cat(metaReadArb.io.out.bits.req(w).tag>> idx_in_tag,metaReadArb.io.out.bits.req(w).idx)(nidxBits-1,0)))
+        meta(w).io.write_random_set(way)   := random_map_array(Cat(way.U,Cat(metaWriteArb.io.out.bits.tag>> idx_in_tag , metaWriteArb.io.out.bits.idx)(nidxBits-1,0)))
+      }
     }
 
   }
@@ -466,17 +481,23 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
   for (w <- 0 until memWidth) {
     data.io.read(w).valid := dataReadArb.io.out.bits.valid(w) && dataReadArb.io.out.valid
     data.io.read(w).bits  := dataReadArb.io.out.bits.req(w)
-    for(way <- 0 until nWays){
-        data.io.read_random_set(w)(way) :=random_map_array(Cat(way.U,dataReadArb.io.out.bits.req(w).addr>> blockOffBits)(nidxBits-1,0)) 
+
+
+    if(cacheParams.usingRandomCache==1){
+      for(way <- 0 until nWays){
+        data.io.read_random_set(w)(way) :=random_map_array(Cat(way.U,(dataReadArb.io.out.bits.req(w).full_addr>> blockOffBits)(nidxBits-1,0))) 
+      }
     }
   }
   dataReadArb.io.out.ready := true.B
 
   data.io.write.valid := dataWriteArb.io.out.fire()
   data.io.write.bits  := dataWriteArb.io.out.bits
+  if(cacheParams.usingRandomCache==1){
 
-  for(way <- 0 until nWays){
-    data.io.write_random_set(way) :=random_map_array(Cat(way.U,dataWriteArb.io.out.bits.addr >> blockOffBits)(nidxBits-1,0))
+    for(way <- 0 until nWays){
+      data.io.write_random_set(way) :=random_map_array(Cat(way.U,(dataWriteArb.io.out.bits.full_addr >> blockOffBits)(nidxBits-1,0)))
+    }
   }
   dataWriteArb.io.out.ready := true.B
 
@@ -493,6 +514,7 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
     // Data read for new requests
       dataReadArb.io.in(2).bits.valid(w)      := io.lsu.req.bits(w).valid
     dataReadArb.io.in(2).bits.req(w).addr   := io.lsu.req.bits(w).bits.addr
+    dataReadArb.io.in(2).bits.req(w).full_addr   := io.lsu.req.bits(w).bits.addr
     dataReadArb.io.in(2).bits.req(w).way_en := ~0.U(nWays.W)
   }
 
@@ -906,6 +928,7 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
 
   dataWriteArb.io.in(0).valid       := s3_valid
   dataWriteArb.io.in(0).bits.addr   := s3_req.addr
+  dataWriteArb.io.in(0).bits.full_addr   := s3_req.addr
   dataWriteArb.io.in(0).bits.wmask  := UIntToOH(s3_req.addr.extract(rowOffBits-1,offsetlsb))
   dataWriteArb.io.in(0).bits.data   := Fill(rowWords, s3_req.data)
   dataWriteArb.io.in(0).bits.way_en := s3_way
