@@ -182,6 +182,7 @@ class WithMyRandomSetTinyBoomsInternal(nsets: Int, nways: Int) extends Config((s
   case MaxHartIdBits => log2Up(site(BoomTilesKey).size)
 })
 
+
 class WithMyTinyBoomsInternal(nsets: Int, nways: Int) extends Config((site, here, up) => {
   case BoomTilesKey => up(BoomTilesKey, site) map { b => b.copy(
     core = b.core.copy(
