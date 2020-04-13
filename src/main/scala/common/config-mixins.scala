@@ -105,24 +105,26 @@ class WithNBoomCores(n: Int) extends Config(
 class WithNormalTinyBoomsInternal(nsets: Int, nways: Int) extends Config((site, here, up) => {
   case BoomTilesKey => up(BoomTilesKey, site) map { b => b.copy(
     core = b.core.copy(
+      useDummyTLB=false,
       mtvecWritable=false,
       useAtomics=false,
       useDebug=false,
       fpu=None,
       fetchWidth = 4,
       useCompressed = true,
-      decodeWidth = 1,
+      decodeWidth = 4,
       numRobEntries = 8,
+      numDCacheBanks=2,
+      numFetchBufferEntries=32,
       issueParams = Seq(
-        IssueParams(issueWidth=1, numEntries=3, iqType=IQT_MEM.litValue, dispatchWidth=1),
-        IssueParams(issueWidth=1, numEntries=3, iqType=IQT_INT.litValue, dispatchWidth=1),
-        IssueParams(issueWidth=1, numEntries=3, iqType=IQT_FP.litValue , dispatchWidth=1)),
+        IssueParams(issueWidth=2, numEntries=8, iqType=IQT_MEM.litValue, dispatchWidth=4),
+        IssueParams(issueWidth=2, numEntries=8, iqType=IQT_INT.litValue, dispatchWidth=4),
+        IssueParams(issueWidth=2, numEntries=8, iqType=IQT_FP.litValue , dispatchWidth=4)),
       numIntPhysRegisters = 48,
       numFpPhysRegisters =48,
-      numLdqEntries = 4,
-      numStqEntries = 4,
+      numLdqEntries = 8,
+      numStqEntries = 8,
       maxBrCount = 4,
-      numFetchBufferEntries = 8,
       btb = BoomBTBParameters(btbsa=true, densebtb=false, nSets=8, nWays=4,
                               nRAS=8, tagSz=20, bypassCalls=false, rasCheckForEmpty=false),
       bpdBaseOnly = None,
@@ -131,7 +133,7 @@ class WithNormalTinyBoomsInternal(nsets: Int, nways: Int) extends Config((site, 
       nPerfCounters = 0,
       tage = None,
       bpdRandom = None,
-      mulDiv = None
+      mulDiv = Some(MulDivParams(mulUnroll = 8))
     ),
     dcache = Some(DCacheParams(rowBits = site(SystemBusKey).beatBits,
                                nSets=nsets, nWays=nways, usingRandomCache=0, nMSHRs=2, nTLBEntries=4)),
@@ -145,6 +147,7 @@ class WithNormalTinyBoomsInternal(nsets: Int, nways: Int) extends Config((site, 
 class WithMyRandomSetTinyBoomsInternal(nsets: Int, nways: Int) extends Config((site, here, up) => {
   case BoomTilesKey => up(BoomTilesKey, site) map { b => b.copy(
     core = b.core.copy(
+      useDummyTLB=false,
       mtvecWritable=false,
       useAtomics=false,
       useDebug=false,
@@ -186,6 +189,7 @@ class WithMyRandomSetTinyBoomsInternal(nsets: Int, nways: Int) extends Config((s
 class WithMyTinyBoomsInternal(nsets: Int, nways: Int) extends Config((site, here, up) => {
   case BoomTilesKey => up(BoomTilesKey, site) map { b => b.copy(
     core = b.core.copy(
+      useDummyTLB=false,
       mtvecWritable=false,
       useAtomics=false,
       useDebug=false,

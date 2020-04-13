@@ -153,6 +153,7 @@ class BoomTile(
     core = RocketCoreParams(
       bootFreqHz          = boomParams.core.bootFreqHz,
       useVM               = boomParams.core.useVM,
+      useDummyTLB         = boomParams.core.useDummyTLB,
       useUser             = boomParams.core.useUser,
       useDebug            = boomParams.core.useDebug,
       useAtomics          = boomParams.core.useAtomics,

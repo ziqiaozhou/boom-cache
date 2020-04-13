@@ -169,10 +169,10 @@ class GShareBrPredictor(
 
   val s_reset :: s_wait :: s_clear :: s_idle :: Nil = Enum(4)
   val fsm_state = RegInit(s_reset)
-  val nResetLagCycles = 128
+  val nResetLagCycles = 0
   val nBanks = 1
   val (lag_counter, lag_done) = Counter(fsm_state === s_wait, nResetLagCycles)
-  val (clear_entry_addr, clear_done) = Counter(fsm_state === s_clear, nSets/nBanks)
+  val (clear_entry_addr, clear_done) = Counter(fsm_state === s_clear,0)
 
   switch (fsm_state) {
     is (s_reset) { fsm_state := s_wait }

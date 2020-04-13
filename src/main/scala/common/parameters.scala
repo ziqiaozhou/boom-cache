@@ -82,6 +82,7 @@ case class BoomCoreParams(
   useDebug: Boolean = true,
   useUser: Boolean = true,
   useVM: Boolean = true,
+  useDummyTLB: Boolean =false,
   useCompressed: Boolean = false,
   useSCIE: Boolean = false,
   useRVE: Boolean = false,

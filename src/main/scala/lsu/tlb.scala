@@ -285,28 +285,54 @@ class NBDTLB(instruction: Boolean, lgMaxSize: Int, cfg: TLBConfig)(implicit edge
   // a miss on duplicate entries.
   val multipleHits = widthMap(w => PopCountAtLeast(real_hits(w), 2))
 
-  io.miss_rdy := state === s_ready
-  for (w <- 0 until memWidth) {
-    io.req(w).ready    := true.B
-    io.resp(w).pf.ld   := (bad_va(w) && cmd_read(w)) || (pf_ld_array(w) & hits(w)).orR
-    io.resp(w).pf.st   := (bad_va(w) && cmd_write_perms(w)) || (pf_st_array(w) & hits(w)).orR
-    io.resp(w).pf.inst := bad_va(w) || (pf_inst_array(w) & hits(w)).orR
-    io.resp(w).ae.ld   := (ae_ld_array(w) & hits(w)).orR
-    io.resp(w).ae.st   := (ae_st_array(w) & hits(w)).orR
-    io.resp(w).ae.inst := (~px_array(w)   & hits(w)).orR
-    io.resp(w).ma.ld   := (ma_ld_array(w) & hits(w)).orR
-    io.resp(w).ma.st   := (ma_st_array(w) & hits(w)).orR
-    io.resp(w).ma.inst := false.B // this is up to the pipeline to figure out
-    io.resp(w).cacheable    := (c_array(w) & hits(w)).orR
-    io.resp(w).must_alloc   := (must_alloc_array(w) & hits(w)).orR
-    io.resp(w).prefetchable := (prefetchable_array(w) & hits(w)).orR && edge.manager.managers.forall(m => !m.supportsAcquireB || m.supportsHint).B
-    io.resp(w).miss  := do_refill || tlb_miss(w) || multipleHits(w)
-    io.resp(w).paddr := Cat(ppn(w), io.req(w).bits.vaddr(pgIdxBits-1, 0))
-  }
+  if(usingDummyTLB){
+    io.miss_rdy := false.B
+    for (w <- 0 until memWidth) {
+      io.req(w).ready    := io.req(w).valid
+      io.resp(w).pf.ld   := false.B
+      io.resp(w).pf.st   := false.B
+      io.resp(w).pf.inst := false.B 
+      io.resp(w).ae.ld   := false.B
+      io.resp(w).ae.st   := false.B 
+      io.resp(w).ae.inst := false.B
+      io.resp(w).ma.ld   := false.B
+      io.resp(w).ma.st   := false.B
+      io.resp(w).ma.inst := false.B // this is up to the pipeline to figure out
+      io.resp(w).cacheable    := true.B
+      io.resp(w).must_alloc   := false.B
+      io.resp(w).prefetchable := false.B 
+      io.resp(w).miss := !io.req(w).valid 
+      io.resp(w).paddr := io.req(w).bits.vaddr
+    }
 
-  io.ptw.req.valid := state === s_request
-  io.ptw.req.bits.valid := !io.kill
-  io.ptw.req.bits.bits.addr := r_refill_tag
+    io.ptw.req.valid := false.B
+    io.ptw.req.bits.valid := false.B
+    io.ptw.req.bits.bits.addr := vpn(0) 
+
+  }else{
+    io.miss_rdy := state === s_ready
+    for (w <- 0 until memWidth) {
+      io.req(w).ready    := true.B
+      io.resp(w).pf.ld   := (bad_va(w) && cmd_read(w)) || (pf_ld_array(w) & hits(w)).orR
+      io.resp(w).pf.st   := (bad_va(w) && cmd_write_perms(w)) || (pf_st_array(w) & hits(w)).orR
+      io.resp(w).pf.inst := bad_va(w) || (pf_inst_array(w) & hits(w)).orR
+      io.resp(w).ae.ld   := (ae_ld_array(w) & hits(w)).orR
+      io.resp(w).ae.st   := (ae_st_array(w) & hits(w)).orR
+      io.resp(w).ae.inst := (~px_array(w)   & hits(w)).orR
+      io.resp(w).ma.ld   := (ma_ld_array(w) & hits(w)).orR
+      io.resp(w).ma.st   := (ma_st_array(w) & hits(w)).orR
+      io.resp(w).ma.inst := false.B // this is up to the pipeline to figure out
+      io.resp(w).cacheable    := (c_array(w) & hits(w)).orR
+      io.resp(w).must_alloc   := (must_alloc_array(w) & hits(w)).orR
+      io.resp(w).prefetchable := (prefetchable_array(w) & hits(w)).orR && edge.manager.managers.forall(m => !m.supportsAcquireB || m.supportsHint).B
+      io.resp(w).miss  := do_refill || tlb_miss(w) || multipleHits(w)
+      io.resp(w).paddr := Cat(ppn(w), io.req(w).bits.vaddr(pgIdxBits-1, 0))
+    }
+
+    io.ptw.req.valid := state === s_request
+    io.ptw.req.bits.valid := !io.kill
+    io.ptw.req.bits.bits.addr := r_refill_tag
+  }
 
   if (usingVM) {
     val sfence = io.sfence.valid
