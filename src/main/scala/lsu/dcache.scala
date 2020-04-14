@@ -58,8 +58,6 @@ class BoomWritebackUnit(implicit edge: TLEdgeOut, p: Parameters) extends L1Hella
   io.resp            := false.B
   io.lsu_release.valid := false.B
 
-
-
   val r_address = Cat(req.tag >> idx_in_tag, req.idx) << blockOffBits
   val id = cfg.nMSHRs
   val probeResponse = edge.ProbeAck(
@@ -340,11 +338,11 @@ class BoomDataArray(implicit p: Parameters) extends BoomModule with HasL1HellaCa
           val ridx = (idx<<linePerTag)+ (random_ridx(linePerTag-1,0))
           var widx=((io.write_random_set(OHToUInt(io.write.bits.wmask)).req_idx)<<linePerTag)+ s0_widx(linePerTag-1,0)
           var wway_en=UIntToOH(io.write_random_set(OHToUInt(io.write.bits.way_en)).way).asUInt
-          s2_bank_reads(b) := array.read(ridx, way_en(w) && s0_bank_read_gnts(b).reduce(_||_)).asUInt
-          when (wway_en(w) && s0_bank_write_gnt(b)) {
-            val data = VecInit((0 until rowWords) map (i => io.write.bits.data(encDataBits*(i+1)-1,encDataBits*i)))
-            array.write(widx, data, io.write.bits.wmask.asBools)
-          }
+            s2_bank_reads(b) := array.read(ridx, way_en(w) && s0_bank_read_gnts(b).reduce(_||_)).asUInt
+            when (wway_en(w) && s0_bank_write_gnt(b)) {
+              val data = VecInit((0 until rowWords) map (i => io.write.bits.data(encDataBits*(i+1)-1,encDataBits*i)))
+              array.write(widx, data, io.write.bits.wmask.asBools)
+            }
         }
     }
 
@@ -420,9 +418,12 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
   var valid_addr_len=log2Ceil(nMemPerDomain)
   var logNSets=log2Ceil(nSets)
   var logNWays=log2Ceil(nWays)
-  var shuffle_bits=log2Ceil(nSets)*cacheParams.r
-  val random_map_array = if(cacheParams.usingRandomCache==1)  Mem(nMemPerDomain*nWays,new L1RandomData) 
+  var shuffle_bits=log2Ceil(nSets)*cacheParams.subWays
+  require(nWays%cacheParams.subWays==0)
+  val random_map_array = if(cacheParams.usingRandomCache==1)  Mem(nMemPerDomain*nWays,new L1RandomData)
+  else if (cacheParams.usingRandomCache==3) Mem(nMemPerDomain* nWays/cacheParams.subWays, new L1PhantomData)
   else  Mem(nSets*nWays,new L1RandomData)
+  val nidxBits    = if(cacheParams.usingRandomCache==1) log2Ceil(nMemPerDomain)  else log2Ceil(nSets)
   var random_map_seed= Mem(nMemPerDomain,UInt(width=shuffle_bits.W) )
   val set_permutation=VecInit((0 until nSets).map(i => L1RandomData(i.U,i.U)))
   /*def getSet(r: UInt) = {
@@ -432,19 +433,20 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
       buf(i1) = buf(i2)
       buf(i2) = tmp
     }
-    for(i <- 0 until cacheParams.r){
+    for(i <- 0 until cacheParams.subWays){
         swap(i,r(i*logNSets+logNSets-1,i*logNSets))
       }
       buf 
     }*/
    loadMemoryFromFile(random_map_array,"random_map_array.txt")
    random_map_array.suggestName("random_map_array")
-   val nidxBits    = if(cacheParams.usingRandomCache==1) log2Ceil(nMemPerDomain)  else log2Ceil(nSets)
    var idx= io.lsu.req.bits(0).bits.addr >> blockOffBits
    when(io.lsu.exception){
      for( w <- 0 until nWays){
-       if(nidxBits>0 & cacheParams.usingRandomCache>0){
-           random_map_array(Cat(w.U,idx(nidxBits-1,0))):=L1RandomData(idx(nidxBits-1,0),idx(nidxBits-1,0))
+       if(cacheParams.usingRandomCache==3){
+          random_map_array(Cat(w.U>>log2Ceil(cacheParams.subWays),idx(nidxBits-1,0))):=L1PhantomData(idx(nidxBits-1,0),idx(nidxBits-1,0))
+          }if(nidxBits>0 & cacheParams.usingRandomCache>0){
+           random_map_array(Cat(w.U>>log2Ceil(cacheParams.subWays),idx(nidxBits-1,0))):=L1RandomData(idx(nidxBits-1,0),idx(nidxBits-1,0))
        }
 
      }
@@ -470,16 +472,24 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
     meta(w).io.write.bits  := metaWriteArb.io.out.bits
     meta(w).io.read.valid  := metaReadArb.io.out.valid
     meta(w).io.read.bits   := metaReadArb.io.out.bits.req(w)
-
     for (way <- 0 until nWays){
-      if(nidxBits>0){ 
-        meta(w).io.read_random_set(way)   := random_map_array(Cat(way.U,Cat(metaReadArb.io.out.bits.req(w).tag>> idx_in_tag,metaReadArb.io.out.bits.req(w).idx)(nidxBits-1,0))) 
-        meta(w).io.write_random_set(way)   :=  random_map_array(Cat(way.U,Cat(metaWriteArb.io.out.bits.tag>> idx_in_tag , metaWriteArb.io.out.bits.idx)(nidxBits-1,0))) 
+      if(nidxBits>0){
+        def meta_read_random=random_map_array(Cat(way.U>>log2Ceil(cacheParams.subWays),Cat(metaReadArb.io.out.bits.req(w).tag>> idx_in_tag,metaReadArb.io.out.bits.req(w).idx)(nidxBits-1,0))) 
+        def meta_write_random= random_map_array(Cat(way.U>>log2Ceil(cacheParams.subWays),Cat(metaWriteArb.io.out.bits.tag>> idx_in_tag , metaWriteArb.io.out.bits.idx)(nidxBits-1,0))) 
+        
+        meta(w).io.read_random_set(way)   := if(cacheParam.usingRandomCache==3)
+        L1RandomData(meta_read_random.set,Cat(way.U,meta_read_random.way)) 
+        else  meta_read_random 
+        meta(w).io.write_random_set(way)   := if(cacheParam.usingRandomCache==3)
+        L1RandomData(meta_write_random.set,Cat(way.U,meta_write_random.way))
+        else  meta_write_random 
+
       }else{
         meta(w).io.read_random_set(way) := L1RandomData(0.U,0.U)
         meta(w).io.write_random_set(way) := L1RandomData(0.U,0.U) 
       }
     }
+
   }
   metaReadArb.io.out.ready  := meta.map(_.io.read.ready).reduce(_||_)
   metaWriteArb.io.out.ready := meta.map(_.io.write.ready).reduce(_||_)
@@ -496,11 +506,14 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
     data.io.read(w).valid := dataReadArb.io.out.bits.valid(w) && dataReadArb.io.out.valid
     data.io.read(w).bits  := dataReadArb.io.out.bits.req(w)
 
-
     for(way <- 0 until nWays){
       if(nidxBits>0){
-        data.io.read_random_set(w)(way) := random_map_array(Cat(way.U,(dataReadArb.io.out.bits.req(w).full_addr>> blockOffBits)(nidxBits-1,0)))
-      }else{
+        def data_read_random=random_map_array(Cat(way.U>>log2Ceil(cacheParams.subWays),Cat(metaReadArb.io.out.bits.req(w).tag>> idx_in_tag,metaReadArb.io.out.bits.req(w).idx)(nidxBits-1,0))) 
+        data.io.read_random_set(w)(way) := if(cacheParams.usingRandomCache==3){
+        }else{
+          data_read_random
+        }
+        }else{
         data.io.read_random_set(w)(way) := L1RandomData(0.U,0.U)
       }
     }
@@ -512,7 +525,8 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
 
   for(way <- 0 until nWays){
     if(nidxBits>0){
-    data.io.write_random_set(way) :=  random_map_array(Cat(way.U,(dataWriteArb.io.out.bits.full_addr >> blockOffBits)(nidxBits-1,0))) }
+      def data_write_random=
+    data.io.write_random_set(way) := random_map_array(Cat(way.U>>log2Ceil(cacheParams.subWays),(dataWriteArb.io.out.bits.full_addr >> blockOffBits)(nidxBits-1,0))) }
     else{
       data.io.write_random_set(way) := L1RandomData(0.U,0.U)
     }
