@@ -1,537 +1,551 @@
-//******************************************************************************
-// Ported from Rocket-Chip
-// See LICENSE.Berkeley and LICENSE.SiFive in Rocket-Chip for license details.
-//------------------------------------------------------------------------------
-//------------------------------------------------------------------------------
+  //******************************************************************************
+  // Ported from Rocket-Chip
+  // See LICENSE.Berkeley and LICENSE.SiFive in Rocket-Chip for license details.
+  //------------------------------------------------------------------------------
+  //------------------------------------------------------------------------------
 
-package boom.lsu
+  package boom.lsu
 
-import chisel3._
-import chisel3.util._
-import scala.util.Random
-import freechips.rocketchip.config.Parameters
-import freechips.rocketchip.diplomacy._
-import freechips.rocketchip.tilelink._
-import freechips.rocketchip.tile._
-import freechips.rocketchip.util._
-import freechips.rocketchip.rocket._
-import chisel3.util.experimental.loadMemoryFromFile
-import boom.common._
-import boom.exu.BrResolutionInfo
-import boom.util.{IsKilledByBranch, GetNewBrMask, BranchKillableQueue, IsOlder, UpdateBrMask, AgePriorityEncoder, WrapInc, Transpose}
-
-
-class BoomWritebackUnit(implicit edge: TLEdgeOut, p: Parameters) extends L1HellaCacheModule()(p) {
-  val io = new Bundle {
-    val req = Flipped(Decoupled(new WritebackReq(edge.bundle)))
-    val meta_read = Decoupled(new L1MetaReadReq)
-    val resp = Output(Bool())
-    val idx = Output(Valid(UInt()))
-    val data_req = Decoupled(new L1DataReadReq)
-    val data_resp = Input(UInt(encRowBits.W))
-    val mem_grant = Input(Bool())
-    val release = Decoupled(new TLBundleC(edge.bundle))
-    val lsu_release = Decoupled(new TLBundleC(edge.bundle))
-  }
-
-  val req = Reg(new WritebackReq(edge.bundle))
-  val s_invalid :: s_fill_buffer :: s_lsu_release :: s_active :: s_grant :: Nil = Enum(5)
-  val state = RegInit(s_invalid)
-  val r1_data_req_fired = RegInit(false.B)
-  val r2_data_req_fired = RegInit(false.B)
-  val r1_data_req_cnt = Reg(UInt(log2Up(refillCycles+1).W))
-  val r2_data_req_cnt = Reg(UInt(log2Up(refillCycles+1).W))
-  val data_req_cnt = RegInit(0.U(log2Up(refillCycles+1).W))
-  val (_, last_beat, all_beats_done, beat_count) = edge.count(io.release)
-  val wb_buffer = Reg(Vec(refillCycles, UInt(encRowBits.W)))
-  val acked = RegInit(false.B)
-
-  io.idx.valid       := state =/= s_invalid
-  io.idx.bits        := req.idx
-  io.release.valid   := false.B
-  io.release.bits    := DontCare
-  io.req.ready       := false.B
-  io.meta_read.valid := false.B
-  io.meta_read.bits  := DontCare
-  io.data_req.valid  := false.B
-  io.data_req.bits   := DontCare
-  io.resp            := false.B
-  io.lsu_release.valid := false.B
-
-  val r_address = Cat(req.tag >> idx_in_tag, req.idx) << blockOffBits
-  val id = cfg.nMSHRs
-  val probeResponse = edge.ProbeAck(
-                          fromSource = id.U,
-                          toAddress = r_address,
-                          lgSize = lgCacheBlockBytes.U,
-                          reportPermissions = req.param,
-                          data = wb_buffer(data_req_cnt))
-
-  val voluntaryRelease = edge.Release(
-                          fromSource = id.U,
-                          toAddress = r_address,
-                          lgSize = lgCacheBlockBytes.U,
-                          shrinkPermissions = req.param,
-                          data = wb_buffer(data_req_cnt))._2
+  import chisel3._
+  import chisel3.util._
+  import scala.util.Random
+  import freechips.rocketchip.config.Parameters
+  import freechips.rocketchip.diplomacy._
+  import freechips.rocketchip.tilelink._
+  import freechips.rocketchip.tile._
+  import freechips.rocketchip.util._
+  import freechips.rocketchip.rocket._
+  import chisel3.util.experimental.loadMemoryFromFile
+  import boom.common._
+  import boom.exu.BrResolutionInfo
+  import boom.util.{IsKilledByBranch, GetNewBrMask, BranchKillableQueue, IsOlder, UpdateBrMask, AgePriorityEncoder, WrapInc, Transpose}
 
 
-  when (state === s_invalid) {
-    io.req.ready := true.B
-    when (io.req.fire()) {
-      state := s_fill_buffer
-      data_req_cnt := 0.U
-      req := io.req.bits
-      acked := false.B
+  class BoomWritebackUnit(implicit edge: TLEdgeOut, p: Parameters) extends L1HellaCacheModule()(p) {
+    val io = new Bundle {
+      val req = Flipped(Decoupled(new WritebackReq(edge.bundle)))
+      val meta_read = Decoupled(new L1MetaReadReq)
+      val resp = Output(Bool())
+      val idx = Output(Valid(UInt()))
+      val data_req = Decoupled(new L1DataReadReq)
+      val data_resp = Input(UInt(encRowBits.W))
+      val mem_grant = Input(Bool())
+      val release = Decoupled(new TLBundleC(edge.bundle))
+      val lsu_release = Decoupled(new TLBundleC(edge.bundle))
     }
-  } .elsewhen (state === s_fill_buffer) {
-    io.meta_read.valid := data_req_cnt < refillCycles.U
-    io.meta_read.bits.idx := req.idx
-    io.meta_read.bits.tag := req.tag
 
-    io.data_req.valid := data_req_cnt < refillCycles.U
-    io.data_req.bits.way_en := req.way_en
-    io.data_req.bits.addr := (if(refillCycles > 1)
-                              Cat(req.idx, data_req_cnt(log2Up(refillCycles)-1,0))
-                            else req.idx) << rowOffBits
+    val req = Reg(new WritebackReq(edge.bundle))
+    val s_invalid :: s_fill_buffer :: s_lsu_release :: s_active :: s_grant :: Nil = Enum(5)
+    val state = RegInit(s_invalid)
+    val r1_data_req_fired = RegInit(false.B)
+    val r2_data_req_fired = RegInit(false.B)
+    val r1_data_req_cnt = Reg(UInt(log2Up(refillCycles+1).W))
+    val r2_data_req_cnt = Reg(UInt(log2Up(refillCycles+1).W))
+    val data_req_cnt = RegInit(0.U(log2Up(refillCycles+1).W))
+    val (_, last_beat, all_beats_done, beat_count) = edge.count(io.release)
+    val wb_buffer = Reg(Vec(refillCycles, UInt(encRowBits.W)))
+    val acked = RegInit(false.B)
 
-    r1_data_req_fired := false.B
-    r1_data_req_cnt   := 0.U
-    r2_data_req_fired := r1_data_req_fired
-    r2_data_req_cnt   := r1_data_req_cnt
-    when (io.data_req.fire() && io.meta_read.fire()) {
-      r1_data_req_fired := true.B
-      r1_data_req_cnt   := data_req_cnt
-      data_req_cnt := data_req_cnt + 1.U
-    }
-    when (r2_data_req_fired) {
-      wb_buffer(r2_data_req_cnt) := io.data_resp
-      when (r2_data_req_cnt === (refillCycles-1).U) {
-        io.resp := true.B
-        state := s_lsu_release
+    io.idx.valid       := state =/= s_invalid
+    io.idx.bits        := req.idx
+    io.release.valid   := false.B
+    io.release.bits    := DontCare
+    io.req.ready       := false.B
+    io.meta_read.valid := false.B
+    io.meta_read.bits  := DontCare
+    io.data_req.valid  := false.B
+    io.data_req.bits   := DontCare
+    io.resp            := false.B
+    io.lsu_release.valid := false.B
+
+    val r_address = Cat(req.tag >> idx_in_tag, req.idx) << blockOffBits
+    val id = cfg.nMSHRs
+    val probeResponse = edge.ProbeAck(
+                            fromSource = id.U,
+                            toAddress = r_address,
+                            lgSize = lgCacheBlockBytes.U,
+                            reportPermissions = req.param,
+                            data = wb_buffer(data_req_cnt))
+
+    val voluntaryRelease = edge.Release(
+                            fromSource = id.U,
+                            toAddress = r_address,
+                            lgSize = lgCacheBlockBytes.U,
+                            shrinkPermissions = req.param,
+                            data = wb_buffer(data_req_cnt))._2
+
+
+    when (state === s_invalid) {
+      io.req.ready := true.B
+      when (io.req.fire()) {
+        state := s_fill_buffer
         data_req_cnt := 0.U
+        req := io.req.bits
+        acked := false.B
+      }
+    } .elsewhen (state === s_fill_buffer) {
+      io.meta_read.valid := data_req_cnt < refillCycles.U
+      io.meta_read.bits.idx := req.idx
+      io.meta_read.bits.tag := req.tag
+
+      io.data_req.valid := data_req_cnt < refillCycles.U
+      io.data_req.bits.way_en := req.way_en
+      io.data_req.bits.addr := (if(refillCycles > 1)
+                                Cat(req.idx, data_req_cnt(log2Up(refillCycles)-1,0))
+                              else req.idx) << rowOffBits
+
+      r1_data_req_fired := false.B
+      r1_data_req_cnt   := 0.U
+      r2_data_req_fired := r1_data_req_fired
+      r2_data_req_cnt   := r1_data_req_cnt
+      when (io.data_req.fire() && io.meta_read.fire()) {
+        r1_data_req_fired := true.B
+        r1_data_req_cnt   := data_req_cnt
+        data_req_cnt := data_req_cnt + 1.U
+      }
+      when (r2_data_req_fired) {
+        wb_buffer(r2_data_req_cnt) := io.data_resp
+        when (r2_data_req_cnt === (refillCycles-1).U) {
+          io.resp := true.B
+          state := s_lsu_release
+          data_req_cnt := 0.U
+        }
+      }
+    } .elsewhen (state === s_lsu_release) {
+      io.lsu_release.valid := true.B
+      io.lsu_release.bits := probeResponse
+      when (io.lsu_release.fire()) {
+       state := s_active
+      }
+    } .elsewhen (state === s_active) {
+      io.release.valid := data_req_cnt < refillCycles.U
+      io.release.bits := Mux(req.voluntary, voluntaryRelease, probeResponse)
+
+      when (io.mem_grant) {
+        acked := true.B
+      }
+      when (io.release.fire()) {
+        data_req_cnt := data_req_cnt + 1.U
+      }
+      when ((data_req_cnt === (refillCycles-1).U) && io.release.fire()) {
+        state := Mux(req.voluntary, s_grant, s_invalid)
+      }
+    } .elsewhen (state === s_grant) {
+      when (io.mem_grant) {
+        acked := true.B
+      }
+      when (acked) {
+        state := s_invalid
       }
     }
-  } .elsewhen (state === s_lsu_release) {
-    io.lsu_release.valid := true.B
-    io.lsu_release.bits := probeResponse
-    when (io.lsu_release.fire()) {
-     state := s_active
-    }
-  } .elsewhen (state === s_active) {
-    io.release.valid := data_req_cnt < refillCycles.U
-    io.release.bits := Mux(req.voluntary, voluntaryRelease, probeResponse)
+  }
 
-    when (io.mem_grant) {
-      acked := true.B
+  class BoomProbeUnit(implicit edge: TLEdgeOut, p: Parameters) extends L1HellaCacheModule()(p) {
+    val io = new Bundle {
+      val req = Flipped(Decoupled(new TLBundleB(edge.bundle)))
+      val rep = Decoupled(new TLBundleC(edge.bundle))
+      val meta_read = Decoupled(new L1MetaReadReq)
+      val meta_write = Decoupled(new L1MetaWriteReq)
+      val wb_req = Decoupled(new WritebackReq(edge.bundle))
+      val way_en = Input(UInt(nWays.W))
+      val wb_rdy = Input(Bool()) // Is writeback unit currently busy? If so need to retry meta read when its done
+      val mshr_rdy = Input(Bool()) // Is MSHR ready for this request to proceed?
+      val mshr_wb_rdy = Output(Bool()) // Should we block MSHR writebacks while we finish our own?
+      val block_state = Input(new ClientMetadata())
+      val lsu_release = Decoupled(new TLBundleC(edge.bundle))
     }
-    when (io.release.fire()) {
-      data_req_cnt := data_req_cnt + 1.U
-    }
-    when ((data_req_cnt === (refillCycles-1).U) && io.release.fire()) {
-      state := Mux(req.voluntary, s_grant, s_invalid)
-    }
-  } .elsewhen (state === s_grant) {
-    when (io.mem_grant) {
-      acked := true.B
-    }
-    when (acked) {
+
+    val (s_invalid :: s_meta_read :: s_meta_resp :: s_mshr_req ::
+         s_mshr_resp :: s_lsu_release :: s_release :: s_writeback_req :: s_writeback_resp ::
+         s_meta_write :: s_meta_write_resp :: Nil) = Enum(11)
+    val state = RegInit(s_invalid)
+
+    val req = Reg(new TLBundleB(edge.bundle))
+    val req_idx = if(nSets>1)req.address(idxMSB, idxLSB) else 0.U
+    val req_tag = if (nSets==1) req.address>> (untagBits-1) else req.address >> (untagBits-idx_in_tag)
+
+    val way_en = Reg(UInt())
+    val tag_matches = way_en.orR
+    val old_coh = Reg(new ClientMetadata)
+    val miss_coh = ClientMetadata.onReset
+    val reply_coh = Mux(tag_matches, old_coh, miss_coh)
+    val (is_dirty, report_param, new_coh) = reply_coh.onProbe(req.param)
+
+    io.req.ready := state === s_invalid
+    io.rep.valid := state === s_release
+    io.rep.bits := edge.ProbeAck(req, report_param)
+
+    assert(!io.rep.valid || !edge.hasData(io.rep.bits),
+      "ProbeUnit should not send ProbeAcks with data, WritebackUnit should handle it")
+
+    io.meta_read.valid := state === s_meta_read
+    io.meta_read.bits.idx := req_idx
+    io.meta_read.bits.tag := req_tag
+    io.meta_write.valid := state === s_meta_write
+    io.meta_write.bits.way_en := way_en
+    io.meta_write.bits.idx := req_idx
+    io.meta_write.bits.data.tag := req_tag
+    io.meta_write.bits.data.coh := new_coh
+
+    io.wb_req.valid := state === s_writeback_req
+    io.wb_req.bits.source := req.source
+    io.wb_req.bits.idx :=req_idx
+    io.wb_req.bits.tag := req_tag
+    io.wb_req.bits.param := report_param
+    io.wb_req.bits.way_en := way_en
+    io.wb_req.bits.voluntary := false.B
+
+
+    io.mshr_wb_rdy := !state.isOneOf(s_release, s_writeback_req, s_writeback_resp, s_meta_write, s_meta_write_resp)
+
+    io.lsu_release.valid := state === s_lsu_release
+    io.lsu_release.bits  := edge.ProbeAck(req, report_param)
+
+    // state === s_invalid
+    when (state === s_invalid) {
+      when (io.req.fire()) {
+        state := s_meta_read
+        req := io.req.bits
+      }
+    } .elsewhen (state === s_meta_read) {
+      when (io.meta_read.fire()) {
+        state := s_meta_resp
+      }
+    } .elsewhen (state === s_meta_resp) {
+      // we need to wait one cycle for the metadata to be read from the array
+      state := s_mshr_req
+    } .elsewhen (state === s_mshr_req) {
+      old_coh := io.block_state
+      way_en := io.way_en
+      // if the read didn't go through, we need to retry
+      state := Mux(io.mshr_rdy && io.wb_rdy, s_mshr_resp, s_meta_read)
+    } .elsewhen (state === s_mshr_resp) {
+      state := Mux(tag_matches && is_dirty, s_writeback_req, s_lsu_release)
+    } .elsewhen (state === s_lsu_release) {
+      when (io.lsu_release.fire()) {
+        state := s_release
+      }
+    } .elsewhen (state === s_release) {
+      when (io.rep.ready) {
+        state := Mux(tag_matches, s_meta_write, s_invalid)
+      }
+    } .elsewhen (state === s_writeback_req) {
+      when (io.wb_req.fire()) {
+        state := s_writeback_resp
+      }
+    } .elsewhen (state === s_writeback_resp) {
+      // wait for the writeback request to finish before updating the metadata
+      when (io.wb_req.ready) {
+        state := s_meta_write
+      }
+    } .elsewhen (state === s_meta_write) {
+      when (io.meta_write.fire()) {
+        state := s_meta_write_resp
+      }
+    } .elsewhen (state === s_meta_write_resp) {
       state := s_invalid
     }
   }
-}
 
-class BoomProbeUnit(implicit edge: TLEdgeOut, p: Parameters) extends L1HellaCacheModule()(p) {
-  val io = new Bundle {
-    val req = Flipped(Decoupled(new TLBundleB(edge.bundle)))
-    val rep = Decoupled(new TLBundleC(edge.bundle))
-    val meta_read = Decoupled(new L1MetaReadReq)
-    val meta_write = Decoupled(new L1MetaWriteReq)
-    val wb_req = Decoupled(new WritebackReq(edge.bundle))
-    val way_en = Input(UInt(nWays.W))
-    val wb_rdy = Input(Bool()) // Is writeback unit currently busy? If so need to retry meta read when its done
-    val mshr_rdy = Input(Bool()) // Is MSHR ready for this request to proceed?
-    val mshr_wb_rdy = Output(Bool()) // Should we block MSHR writebacks while we finish our own?
-    val block_state = Input(new ClientMetadata())
-    val lsu_release = Decoupled(new TLBundleC(edge.bundle))
+  class BoomL1MetaReadReq(implicit p: Parameters) extends BoomBundle()(p) {
+    val req = Vec(memWidth, new L1MetaReadReq)
   }
 
-  val (s_invalid :: s_meta_read :: s_meta_resp :: s_mshr_req ::
-       s_mshr_resp :: s_lsu_release :: s_release :: s_writeback_req :: s_writeback_resp ::
-       s_meta_write :: s_meta_write_resp :: Nil) = Enum(11)
-  val state = RegInit(s_invalid)
-
-  val req = Reg(new TLBundleB(edge.bundle))
-  val req_idx = req.address(idxMSB, idxLSB)
-  val req_tag = req.address >> (untagBits-idx_in_tag)
-
-  val way_en = Reg(UInt())
-  val tag_matches = way_en.orR
-  val old_coh = Reg(new ClientMetadata)
-  val miss_coh = ClientMetadata.onReset
-  val reply_coh = Mux(tag_matches, old_coh, miss_coh)
-  val (is_dirty, report_param, new_coh) = reply_coh.onProbe(req.param)
-
-  io.req.ready := state === s_invalid
-  io.rep.valid := state === s_release
-  io.rep.bits := edge.ProbeAck(req, report_param)
-
-  assert(!io.rep.valid || !edge.hasData(io.rep.bits),
-    "ProbeUnit should not send ProbeAcks with data, WritebackUnit should handle it")
-
-  io.meta_read.valid := state === s_meta_read
-  io.meta_read.bits.idx := req_idx
-  io.meta_read.bits.tag := req_tag
-  io.meta_write.valid := state === s_meta_write
-  io.meta_write.bits.way_en := way_en
-  io.meta_write.bits.idx := req_idx
-  io.meta_write.bits.data.tag := req_tag
-  io.meta_write.bits.data.coh := new_coh
-
-  io.wb_req.valid := state === s_writeback_req
-  io.wb_req.bits.source := req.source
-  io.wb_req.bits.idx :=req_idx
-  io.wb_req.bits.tag := req_tag
-  io.wb_req.bits.param := report_param
-  io.wb_req.bits.way_en := way_en
-  io.wb_req.bits.voluntary := false.B
-
-
-  io.mshr_wb_rdy := !state.isOneOf(s_release, s_writeback_req, s_writeback_resp, s_meta_write, s_meta_write_resp)
-
-  io.lsu_release.valid := state === s_lsu_release
-  io.lsu_release.bits  := edge.ProbeAck(req, report_param)
-
-  // state === s_invalid
-  when (state === s_invalid) {
-    when (io.req.fire()) {
-      state := s_meta_read
-      req := io.req.bits
-    }
-  } .elsewhen (state === s_meta_read) {
-    when (io.meta_read.fire()) {
-      state := s_meta_resp
-    }
-  } .elsewhen (state === s_meta_resp) {
-    // we need to wait one cycle for the metadata to be read from the array
-    state := s_mshr_req
-  } .elsewhen (state === s_mshr_req) {
-    old_coh := io.block_state
-    way_en := io.way_en
-    // if the read didn't go through, we need to retry
-    state := Mux(io.mshr_rdy && io.wb_rdy, s_mshr_resp, s_meta_read)
-  } .elsewhen (state === s_mshr_resp) {
-    state := Mux(tag_matches && is_dirty, s_writeback_req, s_lsu_release)
-  } .elsewhen (state === s_lsu_release) {
-    when (io.lsu_release.fire()) {
-      state := s_release
-    }
-  } .elsewhen (state === s_release) {
-    when (io.rep.ready) {
-      state := Mux(tag_matches, s_meta_write, s_invalid)
-    }
-  } .elsewhen (state === s_writeback_req) {
-    when (io.wb_req.fire()) {
-      state := s_writeback_resp
-    }
-  } .elsewhen (state === s_writeback_resp) {
-    // wait for the writeback request to finish before updating the metadata
-    when (io.wb_req.ready) {
-      state := s_meta_write
-    }
-  } .elsewhen (state === s_meta_write) {
-    when (io.meta_write.fire()) {
-      state := s_meta_write_resp
-    }
-  } .elsewhen (state === s_meta_write_resp) {
-    state := s_invalid
-  }
-}
-
-class BoomL1MetaReadReq(implicit p: Parameters) extends BoomBundle()(p) {
-  val req = Vec(memWidth, new L1MetaReadReq)
-}
-
- class BoomL1DataReadReq(implicit p: Parameters) extends BoomBundle()(p) {
-  val req = Vec(memWidth, new L1DataReadReq)
-  val valid = Vec(memWidth, Bool())
-}
-
-class BoomDataArray(implicit p: Parameters) extends BoomModule with HasL1HellaCacheParameters {
-  val io = IO(new BoomBundle {
-    val read  = Input(Vec(memWidth, Valid(new L1DataReadReq)))
-    val write = Input(Valid(new L1DataWriteReq))
-    val resp  = Output(Vec(memWidth, Vec(nWays, Bits(encRowBits.W))))
-    val nacks = Output(Vec(memWidth, Bool()))
-    val read_random_set =Input(Vec(memWidth,Vec(nWays,new L1RandomData)))
-    val write_random_set =Input(Vec(nWays,new L1RandomData))
-  })
-
-  def pipeMap[T <: Data](f: Int => T) = VecInit((0 until memWidth).map(f))
-
-  val nBanks   = boomParams.numDCacheBanks
-  val bankSize = nSets * refillCycles / nBanks
-  require (nBanks >= memWidth)
-  require (bankSize > 0)
-
-  val bankBits    = log2Ceil(nBanks)
-  val bankOffBits = log2Ceil(rowWords) + log2Ceil(wordBytes)
-  val bidxBits    = log2Ceil(bankSize)
-  val bidxOffBits = bankOffBits + bankBits
-
-  //----------------------------------------------------------------------------------------------------
-
-  val s0_rbanks = if (nBanks > 1) VecInit(io.read.map(r => (r.bits.addr >> bankOffBits)(bankBits-1,0))) else VecInit(0.U)
-  val s0_wbank  = if (nBanks > 1) (io.write.bits.addr >> bankOffBits)(bankBits-1,0) else 0.U
-  val s0_ridxs  = VecInit(io.read.map(r => (r.bits.addr >> bidxOffBits)(bidxBits-1,0)))
-  val s0_widx   = (io.write.bits.addr >> bidxOffBits)(bidxBits-1,0)
-
-  val s0_read_valids    = VecInit(io.read.map(_.valid))
-  val s0_bank_conflicts = pipeMap(w => (0 until w).foldLeft(false.B)((c,i) => c || io.read(i).valid && s0_rbanks(i) === s0_rbanks(w)))
-  val s0_do_bank_read   = s0_read_valids zip s0_bank_conflicts map {case (v,c) => v && !c}
-  val s0_bank_read_gnts = Transpose(VecInit(s0_rbanks zip s0_do_bank_read map {case (b,d) => VecInit((UIntToOH(b) & Fill(nBanks,d)).asBools)}))
-  val s0_bank_write_gnt = (UIntToOH(s0_wbank) & Fill(nBanks, io.write.valid)).asBools
-
-  //----------------------------------------------------------------------------------------------------
-
-  val s1_rbanks         = RegNext(s0_rbanks)
-  val s1_ridxs          = RegNext(s0_ridxs)
-  val s1_read_valids    = RegNext(s0_read_valids)
-  val s1_pipe_selection = pipeMap(i => VecInit(PriorityEncoderOH(pipeMap(j =>
-                            if (j < i) s1_read_valids(j) && s1_rbanks(j) === s1_rbanks(i)
-                            else if (j == i) true.B else false.B))))
-  val s1_ridx_match     = pipeMap(i => pipeMap(j => if (j < i) s1_ridxs(j) === s1_ridxs(i)
-                                                    else if (j == i) true.B else false.B))
-  val s1_nacks          = pipeMap(w => s1_read_valids(w) && (s1_pipe_selection(w).asUInt & ~s1_ridx_match(w).asUInt).orR)
-  val s1_bank_selection = pipeMap(w => Mux1H(s1_pipe_selection(w), s1_rbanks))
-
-  //----------------------------------------------------------------------------------------------------
-
-  val s2_bank_selection = RegNext(s1_bank_selection)
-  val s2_nacks          = RegNext(s1_nacks)
-
-  for (w <- 0 until nWays) {
-    val s2_bank_reads = Reg(Vec(nBanks, Bits(encRowBits.W)))
-
-    for (b <- 0 until nBanks) {
-      val (array, omSRAM) = DescribedSRAM(
-        name = s"array_${w}_${b}",
-        desc = "Non-blocking DCache Data Array",
-        size = bankSize,
-        data = Vec(rowWords, Bits(encDataBits.W))
-      )
-      if(cacheParams.usingRandomCache==0){
-        val ridx = Mux1H(s0_bank_read_gnts(b), s0_ridxs)
-        val way_en = Mux1H(s0_bank_read_gnts(b), io.read.map(_.bits.way_en))
-        s2_bank_reads(b) := array.read(ridx, way_en(w) && s0_bank_read_gnts(b).reduce(_||_)).asUInt
-        when (io.write.bits.way_en(w) && s0_bank_write_gnt(b)) {
-          val data = VecInit((0 until rowWords) map (i => io.write.bits.data(encDataBits*(i+1)-1,encDataBits*i)))
-          array.write(s0_widx, data, io.write.bits.wmask.asBools)
-        }
-        }else{
-          val random_ridx = Mux1H(s0_bank_read_gnts(b), s0_ridxs)
-          val random_way_en = Mux1H(s0_bank_read_gnts(b), io.read.map(_.bits.way_en))
-          val linePerTag = log2Ceil(refillCycles / nBanks)
-          var read_random_set=Mux1H(s0_bank_read_gnts(b),io.read_random_set)
-          val random_choice = read_random_set(OHToUInt(random_way_en))
-          val way_en = UIntToOH(random_choice.way).asUInt
-          val idx= random_choice.req_idx
-          val ridx = (idx<<linePerTag)+ (random_ridx(linePerTag-1,0))
-          var widx=((io.write_random_set(OHToUInt(io.write.bits.wmask)).req_idx)<<linePerTag)+ s0_widx(linePerTag-1,0)
-          var wway_en=UIntToOH(io.write_random_set(OHToUInt(io.write.bits.way_en)).way).asUInt
-            s2_bank_reads(b) := array.read(ridx, way_en(w) && s0_bank_read_gnts(b).reduce(_||_)).asUInt
-            when (wway_en(w) && s0_bank_write_gnt(b)) {
-              val data = VecInit((0 until rowWords) map (i => io.write.bits.data(encDataBits*(i+1)-1,encDataBits*i)))
-              array.write(widx, data, io.write.bits.wmask.asBools)
-            }
-        }
-    }
-
-    for (i <- 0 until memWidth) {
-      io.resp(i)(w) := s2_bank_reads(s2_bank_selection(i))
-    }
+   class BoomL1DataReadReq(implicit p: Parameters) extends BoomBundle()(p) {
+    val req = Vec(memWidth, new L1DataReadReq)
+    val valid = Vec(memWidth, Bool())
   }
 
-  io.nacks := s2_nacks
-}
+  class BoomDataArray(implicit p: Parameters) extends BoomModule with HasL1HellaCacheParameters {
+    val io = IO(new BoomBundle {
+      val read  = Input(Vec(memWidth, Valid(new L1DataReadReq)))
+      val write = Input(Valid(new L1DataWriteReq))
+      val resp  = Output(Vec(memWidth, Vec(nWays, Bits(encRowBits.W))))
+      val nacks = Output(Vec(memWidth, Bool()))
+      val read_random_set =Input(Vec(memWidth,Vec(nWays,new L1RandomData)))
+      val write_random_set =Input(Vec(nWays,new L1RandomData))
+    })
 
-/**
- * Top level class wrapping a non-blocking dcache.
- *
- * @param hartid hardware thread for the cache
- */
-class BoomNonBlockingDCache(hartid: Int)(implicit p: Parameters) extends LazyModule
-{
-  private val tileParams = p(TileKey)
-  protected val cfg = tileParams.dcache.get
+    def pipeMap[T <: Data](f: Int => T) = VecInit((0 until memWidth).map(f))
 
-  protected def cacheClientParameters = cfg.scratch.map(x => Seq()).getOrElse(Seq(TLClientParameters(
-    name          = s"Core ${hartid} DCache",
-    sourceId      = IdRange(0, 1 max (cfg.nMSHRs + 1)),
-    supportsProbe = TransferSizes(cfg.blockBytes, cfg.blockBytes))))
+    val nBanks   = boomParams.numDCacheBanks
+    val bankSize = nSets * refillCycles / nBanks
+    require (nBanks >= memWidth)
+    require (bankSize > 0)
 
-  protected def mmioClientParameters = Seq(TLClientParameters(
-    name          = s"Core ${hartid} DCache MMIO",
-    sourceId      = IdRange(cfg.nMSHRs + 1, cfg.nMSHRs + 1 + cfg.nMMIOs),
-    requestFifo   = true))
+    val bankBits    = log2Ceil(nBanks)
+    val bankOffBits = log2Ceil(rowWords) + log2Ceil(wordBytes)
+    val bidxBits    = log2Ceil(bankSize)
+    val bidxOffBits = bankOffBits + bankBits
 
-  val node = TLClientNode(Seq(TLClientPortParameters(
-    cacheClientParameters ++ mmioClientParameters,
-    minLatency = 1)))
+    //----------------------------------------------------------------------------------------------------
 
-  lazy val module = new BoomNonBlockingDCacheModule(this)
+    val s0_rbanks = if (nBanks > 1) VecInit(io.read.map(r => (r.bits.addr >> bankOffBits)(bankBits-1,0))) else VecInit(0.U)
+    val s0_wbank  = if (nBanks > 1) (io.write.bits.addr >> bankOffBits)(bankBits-1,0) else 0.U
+    val s0_ridxs  = VecInit(io.read.map(r => (r.bits.addr >> bidxOffBits)(bidxBits-1,0)))
+    val s0_widx   = (io.write.bits.addr >> bidxOffBits)(bidxBits-1,0)
 
-  def flushOnFenceI = cfg.scratch.isEmpty && !node.edges.out(0).manager.managers.forall(m => !m.supportsAcquireT || !m.executable || m.regionType >= RegionType.TRACKED || m.regionType <= RegionType.IDEMPOTENT)
+    val s0_read_valids    = VecInit(io.read.map(_.valid))
+    val s0_bank_conflicts = pipeMap(w => (0 until w).foldLeft(false.B)((c,i) => c || io.read(i).valid && s0_rbanks(i) === s0_rbanks(w)))
+    val s0_do_bank_read   = s0_read_valids zip s0_bank_conflicts map {case (v,c) => v && !c}
+    val s0_bank_read_gnts = Transpose(VecInit(s0_rbanks zip s0_do_bank_read map {case (b,d) => VecInit((UIntToOH(b) & Fill(nBanks,d)).asBools)}))
+    val s0_bank_write_gnt = (UIntToOH(s0_wbank) & Fill(nBanks, io.write.valid)).asBools
 
-  require(!tileParams.core.haveCFlush || cfg.scratch.isEmpty, "CFLUSH_D_L1 instruction requires a D$")
-}
+    //----------------------------------------------------------------------------------------------------
 
+    val s1_rbanks         = RegNext(s0_rbanks)
+    val s1_ridxs          = RegNext(s0_ridxs)
+    val s1_read_valids    = RegNext(s0_read_valids)
+    val s1_pipe_selection = pipeMap(i => VecInit(PriorityEncoderOH(pipeMap(j =>
+                              if (j < i) s1_read_valids(j) && s1_rbanks(j) === s1_rbanks(i)
+                              else if (j == i) true.B else false.B))))
+    val s1_ridx_match     = pipeMap(i => pipeMap(j => if (j < i) s1_ridxs(j) === s1_ridxs(i)
+                                                      else if (j == i) true.B else false.B))
+    val s1_nacks          = pipeMap(w => s1_read_valids(w) && (s1_pipe_selection(w).asUInt & ~s1_ridx_match(w).asUInt).orR)
+    val s1_bank_selection = pipeMap(w => Mux1H(s1_pipe_selection(w), s1_rbanks))
 
-class BoomDCacheBundle(implicit p: Parameters, edge: TLEdgeOut) extends BoomBundle()(p) {
-  val hartid = Input(UInt(hartIdLen.W))
-  val errors = new DCacheErrors
-  val lsu   = Flipped(new LSUDMemIO)
-}
+    //----------------------------------------------------------------------------------------------------
 
-class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModuleImp(outer)
-  with HasL1HellaCacheParameters
-  with HasBoomCoreParameters
-{
-  implicit val edge = outer.node.edges.out(0)
-  val (tl_out, _) = outer.node.out(0)
-  val io = IO(new BoomDCacheBundle)
+    val s2_bank_selection = RegNext(s1_bank_selection)
+    val s2_nacks          = RegNext(s1_nacks)
 
-  private val fifoManagers = edge.manager.managers.filter(TLFIFOFixer.allVolatile)
-  fifoManagers.foreach { m =>
-    require (m.fifoId == fifoManagers.head.fifoId,
-      s"IOMSHRs must be FIFO for all regions with effects, but HellaCache sees ${m.nodePath.map(_.name)}")
-  }
+    for (w <- 0 until nWays) {
+      val s2_bank_reads = Reg(Vec(nBanks, Bits(encRowBits.W)))
 
-  def widthMap[T <: Data](f: Int => T) = VecInit((0 until memWidth).map(f))
-
-  val t_replay :: t_probe :: t_wb :: t_mshr_meta_read :: t_lsu :: t_prefetch :: Nil = Enum(6)
-
-  val wb = Module(new BoomWritebackUnit)
-  val prober = Module(new BoomProbeUnit)
-  val mshrs = Module(new BoomMSHRFile)
-  //var onResetRandom=VecInit(Seq.fill(nWays)(L1RandomData(0.U,0.U).asUInt))
-  var nMemPerDomain= nSets* nWays
-  var valid_addr_len=log2Ceil(nMemPerDomain)
-  var logNSets=log2Ceil(nSets)
-  var logNWays=log2Ceil(nWays)
-  var shuffle_bits=log2Ceil(nSets)*cacheParams.subWays
-  require(nWays%cacheParams.subWays==0)
-  val random_map_array = if(cacheParams.usingRandomCache==1)  Mem(nMemPerDomain*nWays,new L1RandomData)
-  else if (cacheParams.usingRandomCache==3) Mem(nMemPerDomain* nWays/cacheParams.subWays, new L1PhantomData)
-  else  Mem(nSets*nWays,new L1RandomData)
-  val nidxBits    = if(cacheParams.usingRandomCache==1) log2Ceil(nMemPerDomain)  else log2Ceil(nSets)
-  var random_map_seed= Mem(nMemPerDomain,UInt(width=shuffle_bits.W) )
-  val set_permutation=VecInit((0 until nSets).map(i => L1RandomData(i.U,i.U)))
-  /*def getSet(r: UInt) = {
-    val buf= set_permutation
-    def swap(i1: Int, i2: Int) {
-      val tmp = buf(i1)
-      buf(i1) = buf(i2)
-      buf(i2) = tmp
-    }
-    for(i <- 0 until cacheParams.subWays){
-        swap(i,r(i*logNSets+logNSets-1,i*logNSets))
+      for (b <- 0 until nBanks) {
+        val (array, omSRAM) = DescribedSRAM(
+          name = s"array_${w}_${b}",
+          desc = "Non-blocking DCache Data Array",
+          size = bankSize,
+          data = Vec(rowWords, Bits(encDataBits.W))
+        )
+        if(cacheParams.usingRandomCache==0){
+          val ridx = Mux1H(s0_bank_read_gnts(b), s0_ridxs)
+          val way_en = Mux1H(s0_bank_read_gnts(b), io.read.map(_.bits.way_en))
+          s2_bank_reads(b) := array.read(ridx, way_en(w) && s0_bank_read_gnts(b).reduce(_||_)).asUInt
+          when (io.write.bits.way_en(w) && s0_bank_write_gnt(b)) {
+            val data = VecInit((0 until rowWords) map (i => io.write.bits.data(encDataBits*(i+1)-1,encDataBits*i)))
+            array.write(s0_widx, data, io.write.bits.wmask.asBools)
+          }
+          }else{
+            val random_ridx = Mux1H(s0_bank_read_gnts(b), s0_ridxs)
+            val random_way_en = Mux1H(s0_bank_read_gnts(b), io.read.map(_.bits.way_en))
+            val linePerTag = log2Ceil(refillCycles / nBanks)
+            var read_random_set=Mux1H(s0_bank_read_gnts(b),io.read_random_set)
+            val random_choice = read_random_set(OHToUInt(random_way_en))
+            val way_en = UIntToOH(random_choice.way).asUInt
+            val idx= random_choice.req_idx
+            val ridx = (idx<<linePerTag)+ (random_ridx(linePerTag-1,0))
+            var widx=((io.write_random_set(OHToUInt(io.write.bits.wmask)).req_idx)<<linePerTag)+ s0_widx(linePerTag-1,0)
+            var wway_en=UIntToOH(io.write_random_set(OHToUInt(io.write.bits.way_en)).way).asUInt
+              s2_bank_reads(b) := array.read(ridx, way_en(w) && s0_bank_read_gnts(b).reduce(_||_)).asUInt
+              when (wway_en(w) && s0_bank_write_gnt(b)) {
+                val data = VecInit((0 until rowWords) map (i => io.write.bits.data(encDataBits*(i+1)-1,encDataBits*i)))
+                array.write(widx, data, io.write.bits.wmask.asBools)
+              }
+          }
       }
-      buf 
-    }*/
-   loadMemoryFromFile(random_map_array,"random_map_array.txt")
-   random_map_array.suggestName("random_map_array")
-   var idx= io.lsu.req.bits(0).bits.addr >> blockOffBits
-   when(io.lsu.exception){
-     for( w <- 0 until nWays){
-       if(cacheParams.usingRandomCache==3){
-          random_map_array(Cat(w.U>>log2Ceil(cacheParams.subWays),idx(nidxBits-1,0))):=L1PhantomData(idx(nidxBits-1,0),idx(nidxBits-1,0))
-          }else if(nidxBits>0 & cacheParams.usingRandomCache>0){
-           random_map_array(Cat(w.U>>log2Ceil(cacheParams.subWays),idx(nidxBits-1,0))):=L1RandomData(idx(nidxBits-1,0),idx(nidxBits-1,0))
+
+      for (i <- 0 until memWidth) {
+        io.resp(i)(w) := s2_bank_reads(s2_bank_selection(i))
+      }
+    }
+
+    io.nacks := s2_nacks
+  }
+
+  /**
+   * Top level class wrapping a non-blocking dcache.
+   *
+   * @param hartid hardware thread for the cache
+   */
+  class BoomNonBlockingDCache(hartid: Int)(implicit p: Parameters) extends LazyModule
+  {
+    private val tileParams = p(TileKey)
+    protected val cfg = tileParams.dcache.get
+
+    protected def cacheClientParameters = cfg.scratch.map(x => Seq()).getOrElse(Seq(TLClientParameters(
+      name          = s"Core ${hartid} DCache",
+      sourceId      = IdRange(0, 1 max (cfg.nMSHRs + 1)),
+      supportsProbe = TransferSizes(cfg.blockBytes, cfg.blockBytes))))
+
+    protected def mmioClientParameters = Seq(TLClientParameters(
+      name          = s"Core ${hartid} DCache MMIO",
+      sourceId      = IdRange(cfg.nMSHRs + 1, cfg.nMSHRs + 1 + cfg.nMMIOs),
+      requestFifo   = true))
+
+    val node = TLClientNode(Seq(TLClientPortParameters(
+      cacheClientParameters ++ mmioClientParameters,
+      minLatency = 1)))
+
+    lazy val module = new BoomNonBlockingDCacheModule(this)
+
+    def flushOnFenceI = cfg.scratch.isEmpty && !node.edges.out(0).manager.managers.forall(m => !m.supportsAcquireT || !m.executable || m.regionType >= RegionType.TRACKED || m.regionType <= RegionType.IDEMPOTENT)
+
+    require(!tileParams.core.haveCFlush || cfg.scratch.isEmpty, "CFLUSH_D_L1 instruction requires a D$")
+  }
+
+
+  class BoomDCacheBundle(implicit p: Parameters, edge: TLEdgeOut) extends BoomBundle()(p) {
+    val hartid = Input(UInt(hartIdLen.W))
+    val errors = new DCacheErrors
+    val lsu   = Flipped(new LSUDMemIO)
+  }
+
+  class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModuleImp(outer)
+    with HasL1HellaCacheParameters
+    with HasBoomCoreParameters
+  {
+    implicit val edge = outer.node.edges.out(0)
+    val (tl_out, _) = outer.node.out(0)
+    val io = IO(new BoomDCacheBundle)
+
+    private val fifoManagers = edge.manager.managers.filter(TLFIFOFixer.allVolatile)
+    fifoManagers.foreach { m =>
+      require (m.fifoId == fifoManagers.head.fifoId,
+        s"IOMSHRs must be FIFO for all regions with effects, but HellaCache sees ${m.nodePath.map(_.name)}")
+    }
+
+    def widthMap[T <: Data](f: Int => T) = VecInit((0 until memWidth).map(f))
+
+    val t_replay :: t_probe :: t_wb :: t_mshr_meta_read :: t_lsu :: t_prefetch :: Nil = Enum(6)
+
+    val wb = Module(new BoomWritebackUnit)
+    val prober = Module(new BoomProbeUnit)
+    val mshrs = Module(new BoomMSHRFile)
+    //var onResetRandom=VecInit(Seq.fill(nWays)(L1RandomData(0.U,0.U).asUInt))
+    var nMemPerDomain= 32 
+    var valid_addr_len=log2Ceil(nMemPerDomain)
+    var logNSets=log2Ceil(nSets)
+    var logNWays=log2Ceil(nWays)
+    var shuffle_bits=log2Ceil(nSets)*cacheParams.subWays
+    require(nWays%cacheParams.subWays==0)
+    val random_map_array = if(cacheParams.usingRandomCache==1)  Mem(nMemPerDomain*nWays,new L1RandomData)
+    else if (cacheParams.usingRandomCache==3) Mem(nMemPerDomain* nWays/cacheParams.subWays, new L1PhantomData)
+    else  Mem(nSets*nWays,new L1RandomData)
+    val nidxBits    = if(cacheParams.usingRandomCache==1) log2Ceil(nMemPerDomain) 
+    else if(cacheParams.usingRandomCache==3) log2Ceil(nMemPerDomain)
+      else log2Ceil(nSets)
+    var random_map_seed= Mem(nMemPerDomain,UInt(width=shuffle_bits.W) )
+    val set_permutation=VecInit((0 until nSets).map(i => L1RandomData(i.U,i.U)))
+    /*def getSet(r: UInt) = {
+      val buf= set_permutation
+      def swap(i1: Int, i2: Int) {
+        val tmp = buf(i1)
+        buf(i1) = buf(i2)
+        buf(i2) = tmp
+      }
+      for(i <- 0 until cacheParams.subWays){
+          swap(i,r(i*logNSets+logNSets-1,i*logNSets))
+        }
+        buf 
+      }*/
+     loadMemoryFromFile(random_map_array,"random_map_array.txt")
+     random_map_array.suggestName("random_map_array")
+     var idx= io.lsu.req.bits(0).bits.addr >> blockOffBits
+     when(io.lsu.exception){
+       for( w <- 0 until nWays){
+         if(cacheParams.usingRandomCache==3){
+            random_map_array(Cat(w.U>>log2Ceil(cacheParams.subWays),idx(nidxBits-1,0))):=L1PhantomData(idx,idx)
+            }else if(nidxBits>0 & cacheParams.usingRandomCache>0){
+             random_map_array(Cat(w.U>>log2Ceil(cacheParams.subWays),idx(nidxBits-1,0))):=L1RandomData(idx(nidxBits-1,0),idx(nidxBits-1,0))
+         }
        }
-
      }
-   }
-    mshrs.io.clear_all    := io.lsu.force_order
-    mshrs.io.brinfo       := io.lsu.brinfo
-    mshrs.io.exception    := io.lsu.exception
-  mshrs.io.rob_pnr_idx  := io.lsu.rob_pnr_idx
-  mshrs.io.rob_head_idx := io.lsu.rob_head_idx
+      mshrs.io.clear_all    := io.lsu.force_order
+      mshrs.io.brinfo       := io.lsu.brinfo
+      mshrs.io.exception    := io.lsu.exception
+    mshrs.io.rob_pnr_idx  := io.lsu.rob_pnr_idx
+    mshrs.io.rob_head_idx := io.lsu.rob_head_idx
 
-  // tags
-  def onReset = L1Metadata(0.U, ClientMetadata.onReset)
-  val meta = Seq.fill(memWidth) { Module(new L1MetadataArray(onReset _)) }
-  val metaWriteArb = Module(new Arbiter(new L1MetaWriteReq, 2))
-  // 0 goes to MSHR refills, 1 goes to prober
-  val metaReadArb = Module(new Arbiter(new BoomL1MetaReadReq, 6))
-  // 0 goes to MSHR replays, 1 goes to prober, 2 goes to wb, 3 goes to MSHR meta read,
-  // 4 goes to pipeline, 5 goes to prefetcher
+    // tags
+    def onReset = L1Metadata(0.U, ClientMetadata.onReset)
+    val meta = Seq.fill(memWidth) { Module(new L1MetadataArray(onReset _)) }
+    val metaWriteArb = Module(new Arbiter(new L1MetaWriteReq, 2))
+    // 0 goes to MSHR refills, 1 goes to prober
+    val metaReadArb = Module(new Arbiter(new BoomL1MetaReadReq, 6))
+    // 0 goes to MSHR replays, 1 goes to prober, 2 goes to wb, 3 goes to MSHR meta read,
+    // 4 goes to pipeline, 5 goes to prefetcher
 
-  metaReadArb.io.in := DontCare
-  for (w <- 0 until memWidth) {
-    meta(w).io.write.valid := metaWriteArb.io.out.fire()
-    meta(w).io.write.bits  := metaWriteArb.io.out.bits
-    meta(w).io.read.valid  := metaReadArb.io.out.valid
-    meta(w).io.read.bits   := metaReadArb.io.out.bits.req(w)
-    for (way <- 0 until nWays){
-      if(nidxBits>0){
-        def meta_read_random=random_map_array(Cat(way.U>>log2Ceil(cacheParams.subWays),Cat(metaReadArb.io.out.bits.req(w).tag>> idx_in_tag,metaReadArb.io.out.bits.req(w).idx)(nidxBits-1,0))) 
-        def meta_write_random= random_map_array(Cat(way.U>>log2Ceil(cacheParams.subWays),Cat(metaWriteArb.io.out.bits.tag>> idx_in_tag , metaWriteArb.io.out.bits.idx)(nidxBits-1,0))) 
-        if(cacheParam.usingRandomCache==3)
-        meta(w).io.read_random_set(way) :=  L1RandomData(meta_read_random.set,Cat(way.U,meta_read_random.way)) 
-        else   meta(w).io.read_random_set(way)   := meta_read_random 
-       	if(cacheParam.usingRandomCache==3) meta(w).io.write_random_set(way) := L1RandomData(meta_write_random.set,Cat(way.U,meta_write_random.way))
-        else  meta(w).io.write_random_set(way) := meta_write_random 
+    metaReadArb.io.in := DontCare
+    for (w <- 0 until memWidth) {
+      meta(w).io.write.valid := metaWriteArb.io.out.fire()
+      meta(w).io.write.bits  := metaWriteArb.io.out.bits
+      meta(w).io.read.valid  := metaReadArb.io.out.valid
+      meta(w).io.read.bits   := metaReadArb.io.out.bits.req(w)
+      for (way <- 0 until nWays){
+        if(nidxBits>0){
+          val meta_read_random=if (idx_in_tag >0 )random_map_array(Cat(way.U>>log2Ceil(cacheParams.subWays),Cat(metaReadArb.io.out.bits.req(w).tag>> idx_in_tag,metaReadArb.io.out.bits.req(w).idx)(nidxBits-1,0)))else
+random_map_array(Cat(way.U>>log2Ceil(cacheParams.subWays),metaReadArb.io.out.bits.req(w).tag(nidxBits-1,0)))
 
-      }else{
-        meta(w).io.read_random_set(way) := L1RandomData(0.U,0.U)
-        meta(w).io.write_random_set(way) := L1RandomData(0.U,0.U) 
+          val meta_write_random= if(idx_in_tag>0) 
+          random_map_array(Cat(way.U>>log2Ceil(cacheParams.subWays),Cat(metaWriteArb.io.out.bits.data.tag>> idx_in_tag , metaWriteArb.io.out.bits.idx)(nidxBits-1,0)))
+        else
+          random_map_array(Cat(way.U>>log2Ceil(cacheParams.subWays),metaWriteArb.io.out.bits.data.tag(nidxBits-1,0)))
+          if(cacheParams.usingRandomCache==1)
+            meta(w).io.read_random_set(way) :=  L1RandomData(meta_read_random.req_idx,way.U) 
+          else if(cacheParams.usingRandomCache==3)
+            meta(w).io.read_random_set(way) :=  L1RandomData(meta_read_random.req_idx,Cat(way.U,meta_read_random.subIdx)) 
+          else   meta(w).io.read_random_set(way)   := meta_read_random 
+          if(cacheParams.usingRandomCache==1) 
+            meta(w).io.write_random_set(way) := L1RandomData(meta_write_random.req_idx,way.U)
+          else if(cacheParams.usingRandomCache==3) 
+            meta(w).io.write_random_set(way) := L1RandomData(meta_write_random.req_idx,Cat(way.U ,meta_write_random.subIdx))
+          else  meta(w).io.write_random_set(way) := meta_write_random 
+        }else{
+          meta(w).io.read_random_set(way) := L1RandomData(0.U,0.U)
+          meta(w).io.write_random_set(way) := L1RandomData(0.U,0.U) 
+        }
+      }
+
+    }
+    metaReadArb.io.out.ready  := meta.map(_.io.read.ready).reduce(_||_)
+    metaWriteArb.io.out.ready := meta.map(_.io.write.ready).reduce(_||_)
+
+    // data
+    val data = Module(new BoomDataArray)
+    val dataWriteArb = Module(new Arbiter(new L1DataWriteReq, 2))
+    // 0 goes to pipeline, 1 goes to MSHR refills
+    val dataReadArb = Module(new Arbiter(new BoomL1DataReadReq, 3))
+    // 0 goes to MSHR replays, 1 goes to wb, 2 goes to pipeline
+    dataReadArb.io.in := DontCare
+
+    for (w <- 0 until memWidth) {
+      data.io.read(w).valid := dataReadArb.io.out.bits.valid(w) && dataReadArb.io.out.valid
+      data.io.read(w).bits  := dataReadArb.io.out.bits.req(w)
+
+      for(way <- 0 until nWays){
+        if(nidxBits>0){
+            val data_read_random=random_map_array(Cat(way.U>>log2Ceil(cacheParams.subWays),(dataWriteArb.io.out.bits.full_addr >> blockOffBits)(nidxBits-1,0))) 
+            if(cacheParams.usingRandomCache==1)  data.io.read_random_set(w)(way) := 
+              L1RandomData(data_read_random.req_idx,way.U) 
+            else if(cacheParams.usingRandomCache==3)  data.io.read_random_set(w)(way) := 
+              L1RandomData(data_read_random.req_idx,Cat(way.U,data_read_random.subIdx)) 
+            else{
+                data.io.read_random_set(w)(way) := data_read_random
+            }
+        }else{
+            data.io.read_random_set(w)(way) := L1RandomData(0.U,0.U)
+        }
       }
     }
+    dataReadArb.io.out.ready := true.B
 
-  }
-  metaReadArb.io.out.ready  := meta.map(_.io.read.ready).reduce(_||_)
-  metaWriteArb.io.out.ready := meta.map(_.io.write.ready).reduce(_||_)
-
-  // data
-  val data = Module(new BoomDataArray)
-  val dataWriteArb = Module(new Arbiter(new L1DataWriteReq, 2))
-  // 0 goes to pipeline, 1 goes to MSHR refills
-  val dataReadArb = Module(new Arbiter(new BoomL1DataReadReq, 3))
-  // 0 goes to MSHR replays, 1 goes to wb, 2 goes to pipeline
-  dataReadArb.io.in := DontCare
-
-  for (w <- 0 until memWidth) {
-    data.io.read(w).valid := dataReadArb.io.out.bits.valid(w) && dataReadArb.io.out.valid
-    data.io.read(w).bits  := dataReadArb.io.out.bits.req(w)
+    data.io.write.valid := dataWriteArb.io.out.fire()
+    data.io.write.bits  := dataWriteArb.io.out.bits
 
     for(way <- 0 until nWays){
       if(nidxBits>0){
-		  def data_read_random=random_map_array(Cat(way.U>>log2Ceil(cacheParams.subWays),Cat(metaReadArb.io.out.bits.req(w).tag>> idx_in_tag,metaReadArb.io.out.bits.req(w).idx)(nidxBits-1,0))) 
-		  if(cacheParams.usingRandomCache==3)  data.io.read_random_set(w)(way) := 
-			  L1RandomData(data_read_random.set,Cat(way.U,data_read_random.way)) 
-		  else{
-			  data.io.read_random_set(w)(way) := data_read_random
-		  }
-	  }else{
-		  data.io.read_random_set(w)(way) := L1RandomData(0.U,0.U)
-      }
-    }
-  }
-  dataReadArb.io.out.ready := true.B
-
-  data.io.write.valid := dataWriteArb.io.out.fire()
-  data.io.write.bits  := dataWriteArb.io.out.bits
-
-  for(way <- 0 until nWays){
-    if(nidxBits>0){
-		def data_write_random= random_map_array(Cat(way.U>>log2Ceil(cacheParams.subWays),(dataWriteArb.io.out.bits.full_addr >> blockOffBits)(nidxBits-1,0)))
-	  	if(cacheParams.usingRandomCache==3) data.io.write_random_set(way) := 
-			L1RandomData(data_write_random.set,Cat(way.U,data_write_random.way))
-		else{ 
-			data.io.write_random_set(way) := data_write_random 
-		}
-	}else{
-      data.io.write_random_set(way) := L1RandomData(0.U,0.U)
+          val data_write_random = random_map_array(Cat(way.U>>log2Ceil(cacheParams.subWays),(dataWriteArb.io.out.bits.full_addr >> blockOffBits)(nidxBits-1,0)))
+          if(cacheParams.usingRandomCache==1) data.io.write_random_set(way) := 
+            L1RandomData(data_write_random.req_idx,way.U)
+          else if(cacheParams.usingRandomCache==3) data.io.write_random_set(way) := 
+            L1RandomData(data_write_random.req_idx,Cat(way.U,data_write_random.subIdx))
+          else{ 
+            data.io.write_random_set(way) := data_write_random 
+          }
+      }else{
+        data.io.write_random_set(way) := L1RandomData(0.U,0.U)
     }
   }
   dataWriteArb.io.out.ready := true.B
@@ -547,7 +561,7 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
     metaReadArb.io.in(4).bits.req(w).way_en := DontCare
     metaReadArb.io.in(4).bits.req(w).tag    := io.lsu.req.bits(w).bits.addr >> blockOffBits
     // Data read for new requests
-      dataReadArb.io.in(2).bits.valid(w)      := io.lsu.req.bits(w).valid
+    dataReadArb.io.in(2).bits.valid(w)      := io.lsu.req.bits(w).valid
     dataReadArb.io.in(2).bits.req(w).addr   := io.lsu.req.bits(w).bits.addr
     dataReadArb.io.in(2).bits.req(w).full_addr   := io.lsu.req.bits(w).bits.addr
     dataReadArb.io.in(2).bits.req(w).way_en := ~0.U(nWays.W)
@@ -674,7 +688,8 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
   for (w <- 0 until memWidth)
     assert(!(io.lsu.s1_kill(w) && !RegNext(io.lsu.req.fire()) && !RegNext(io.lsu.req.bits(w).valid)))
   val s1_addr         = s1_req.map(_.addr)
-  val s1_nack         = s1_addr.map(a => a(idxMSB,idxLSB) === prober.io.meta_write.bits.idx && !prober.io.req.ready)
+  val s1_nack         = if (nSets>1) s1_addr.map(a => a(idxMSB,idxLSB) === prober.io.meta_write.bits.idx && !prober.io.req.ready) else s1_addr.map(a => !prober.io.req.ready) 
+
   val s1_send_resp_or_nack = RegNext(s0_send_resp_or_nack)
   val s1_type         = RegNext(s0_type)
 
@@ -684,14 +699,16 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
 
   // tag check
   def wayMap[T <: Data](f: Int => T) = VecInit((0 until nWays).map(f))
-  val s1_tag_eq_way = widthMap(i => wayMap((w: Int) => meta(i).io.resp(w).tag === (s1_addr(i) >> (untagBits-idx_in_tag))).asUInt)
+  val s1_tag_eq_way = if (nSets==1) widthMap(i => wayMap((w: Int) => meta(i).io.resp(w).tag === (s1_addr(i) >> (untagBits-1))).asUInt)
+  else widthMap(i => wayMap((w: Int) => meta(i).io.resp(w).tag === (s1_addr(i) >> (untagBits-idx_in_tag))).asUInt)
   val s1_tag_match_way = widthMap(i =>
                          Mux(s1_type === t_replay, s1_replay_way_en,
                          Mux(s1_type === t_wb,     s1_wb_way_en,
                          Mux(s1_type === t_mshr_meta_read, s1_mshr_meta_read_way_en,
                            wayMap((w: Int) => s1_tag_eq_way(i)(w) && meta(i).io.resp(w).coh.isValid()).asUInt))))
 
-  val s1_wb_idx_matches = widthMap(i => (s1_addr(i)(untagBits-1,blockOffBits) === wb.io.idx.bits) && wb.io.idx.valid)
+  val s1_wb_idx_matches = if(nSets==1) widthMap(i => wb.io.idx.valid)
+  else widthMap(i => (s1_addr(i)(untagBits-1,blockOffBits) === wb.io.idx.bits) && wb.io.idx.valid)
 
   val s2_req   = RegNext(s1_req)
   val s2_type  = RegNext(s1_type)
@@ -916,7 +933,6 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
                             !(io.lsu.exception && resp(w).bits.uop.uses_ldq) &&
                             !IsKilledByBranch(io.lsu.brinfo, resp(w).bits.uop)
     io.lsu.resp(w).bits  := UpdateBrMask(io.lsu.brinfo, resp(w).bits)
-
     io.lsu.nack(w).valid := s2_valid(w) && s2_send_nack(w) &&
                             !(io.lsu.exception && s2_req(w).uop.uses_ldq) &&
                             !IsKilledByBranch(io.lsu.brinfo, s2_req(w).uop)
@@ -967,7 +983,5 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
   dataWriteArb.io.in(0).bits.wmask  := UIntToOH(s3_req.addr.extract(rowOffBits-1,offsetlsb))
   dataWriteArb.io.in(0).bits.data   := Fill(rowWords, s3_req.data)
   dataWriteArb.io.in(0).bits.way_en := s3_way
-
-
   io.lsu.ordered := mshrs.io.fence_rdy && !s1_valid.reduce(_||_) && !s2_valid.reduce(_||_)
 }

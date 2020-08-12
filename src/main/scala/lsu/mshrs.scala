@@ -107,8 +107,8 @@ class BoomMSHR(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()(p)
   val state = RegInit(s_invalid)
 
   val req     = Reg(new BoomDCacheReqInternal)
-  val req_idx = req.addr(untagBits-1, blockOffBits)
-  val req_tag = req.addr >> (untagBits-idx_in_tag)
+  val req_idx =req.addr(untagBits-1, blockOffBits)
+  val req_tag = if (nSets>1)req.addr >> (untagBits-idx_in_tag) else req.addr >> (untagBits-1) 
   val req_block_addr = (req.addr >> blockOffBits) << blockOffBits
   val req_needs_wb = RegInit(false.B)
 
@@ -213,7 +213,7 @@ class BoomMSHR(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()(p)
     // TODO: Use AcquirePerm if just doing permissions acquire
     io.mem_acquire.bits  := edge.AcquireBlock(
       fromSource      = io.id,
-      toAddress       = Cat(req_tag>>idx_in_tag, req_idx) << blockOffBits,
+      toAddress       = if (nSets>1 )Cat(req_tag>>idx_in_tag, req_idx) << blockOffBits else req_tag<<blockOffBits,
       lgSize          = lgCacheBlockBytes.U,
       growPermissions = grow_param)._2
     when (io.mem_acquire.fire()) {
@@ -340,7 +340,7 @@ class BoomMSHR(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()(p)
   } .elsewhen (state === s_drain_rpq) {
     io.replay <> rpq.io.deq
     io.replay.bits.way_en    := req.way_en
-    io.replay.bits.addr := Cat(req_tag>>idx_in_tag, req_idx, rpq.io.deq.bits.addr(blockOffBits-1,0))
+    io.replay.bits.addr :=Cat(req_tag>>idx_in_tag, req_idx, rpq.io.deq.bits.addr(blockOffBits-1,0))
     when (io.replay.fire() && isWrite(rpq.io.deq.bits.uop.mem_cmd)) {
       // Set dirty bit
       val (is_hit, _, coh_on_hit) = new_coh.onAccess(rpq.io.deq.bits.uop.mem_cmd)
@@ -622,8 +622,14 @@ class BoomMSHRFile(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()
     mshr.io.id := i.U(log2Ceil(cfg.nMSHRs).W)
 
     for (w <- 0 until memWidth) {
-      idx_matches(w)(i) := mshr.io.idx.valid && mshr.io.idx.bits === io.req(w).bits.addr(untagBits-1,blockOffBits)
-      tag_matches(w)(i) := mshr.io.tag.valid && mshr.io.tag.bits === io.req(w).bits.addr >> untagBits
+      if(nSets==1)
+        idx_matches(w)(i) := mshr.io.idx.valid 
+      else 
+        idx_matches(w)(i) := (mshr.io.idx.valid && mshr.io.idx.bits === io.req(w).bits.addr(untagBits-1,blockOffBits))
+      if(nSets>1) 
+        tag_matches(w)(i) := mshr.io.tag.valid && mshr.io.tag.bits === io.req(w).bits.addr >> untagBits 
+      else
+        tag_matches(w)(i) :=mshr.io.idx.valid
       way_matches(w)(i) := mshr.io.way.valid && mshr.io.way.bits === io.req(w).bits.way_en
     }
     wb_tag_list(i) := mshr.io.wb_req.bits.tag
